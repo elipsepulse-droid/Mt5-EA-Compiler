@@ -25,29 +25,31 @@ jobs:
         $editor="C:\Program Files\MetaTrader 5\metaeditor64.exe"
         echo "METAEDITOR=$editor" >> $env:GITHUB_ENV
 
-    - name: Locate MT5 Terminal Folder
+    - name: Detect MT5 Data Folder
       run: |
-        $terminalRoot="$env:APPDATA\MetaQuotes\Terminal"
-        $folder=Get-ChildItem $terminalRoot | Where-Object {$_.PSIsContainer} | Select-Object -First 1
-        $mql="$terminalRoot\$($folder.Name)\MQL5"
+        $root="$env:APPDATA\MetaQuotes\Terminal"
+        $folder=Get-ChildItem $root | Where-Object {$_.PSIsContainer} | Select-Object -First 1
+        $data="$root\$($folder.Name)"
+        $mql="$data\MQL5"
 
+        echo "MT5DATA=$data" >> $env:GITHUB_ENV
         echo "MQLPATH=$mql" >> $env:GITHUB_ENV
 
-    - name: Prepare EA source
+    - name: Copy EA into terminal
       run: |
         $experts="$env:MQLPATH\Experts"
         New-Item -ItemType Directory -Force -Path $experts
-        Copy-Item EA_DANE_AUTO_BOT2.mq5 $experts
+        Copy-Item EA_DANE_AUTO_BOT2.mq5 "$experts\EA_DANE_AUTO_BOT2.mq5"
 
-    - name: Compile MQ5
+    - name: Compile Expert Advisor
       run: |
-        & "$env:METAEDITOR" /compile:"$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5" /log:compile.log
+        & "$env:METAEDITOR" /portable /compile:"$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5" /log:compile.log
 
     - name: Show compiler log
       run: |
         Get-Content compile.log
 
-    - name: Find EX5
+    - name: Collect compiled EX5
       run: |
         $file = Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
         if($file){
@@ -59,7 +61,7 @@ jobs:
           exit 1
         }
 
-    - name: Upload EX5
+    - name: Upload compiled EA
       uses: actions/upload-artifact@v4
       with:
         name: compiled-ea
