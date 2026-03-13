@@ -1,0 +1,30 @@
+name: MT5 EA Compile
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Download MetaTrader 5
+      run: |
+        curl -L -o mt5setup.exe https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe
+
+    - name: Install MT5
+      run: |
+        start /wait mt5setup.exe /silent
+
+    - name: Compile EA
+      run: |
+        "C:\Program Files\MetaTrader 5\metaeditor64.exe" /compile:"EA_DANE_AUTO_BOT.mq5"
+
+    - name: Upload compiled file
+      uses: actions/upload-artifact@v4
+      with:
+        name: compiled_ea
+        path: "*.ex5"
