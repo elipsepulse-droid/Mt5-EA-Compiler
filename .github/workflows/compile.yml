@@ -1,6 +1,7 @@
 name: MT5 EA Compile
 
 on:
+  push:
   workflow_dispatch:
 
 jobs:
@@ -10,7 +11,7 @@ jobs:
     steps:
 
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v3
 
     - name: Download MetaTrader 5
       run: |
@@ -18,29 +19,45 @@ jobs:
 
     - name: Install MetaTrader 5
       run: |
-        Start-Process mt5setup.exe -ArgumentList "/silent" -Wait
+        Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
 
     - name: Locate MetaEditor
-      id: find_editor
+      id: locate
       run: |
-        $editor = "C:\Program Files\MetaTrader 5\metaeditor64.exe"
-        if (Test-Path $editor) {
-          echo "editor=$editor" >> $env:GITHUB_OUTPUT
+        $path1 = "C:\Program Files\MetaTrader 5\metaeditor64.exe"
+        $path2 = "C:\Program Files (x86)\MetaTrader 5\metaeditor.exe"
+
+        if (Test-Path $path1) {
+            echo "METAEDITOR=$path1" >> $env:GITHUB_ENV
+        }
+        elseif (Test-Path $path2) {
+            echo "METAEDITOR=$path2" >> $env:GITHUB_ENV
+        }
+        else {
+            Write-Error "MetaEditor not found"
+            exit 1
         }
 
     - name: Compile MQ5
       run: |
-        $editor="${{ steps.find_editor.outputs.editor }}"
-        $source="${{ github.workspace }}\EA_DANE_AUTO_BOT2.mq5"
-        & $editor /compile:$source /log
+        mkdir compiled
+        & "$env:METAEDITOR" /compile:EA_DANE_AUTO_BOT2.mq5 /log:compile.log
 
     - name: Search compiled EX5
       run: |
-        Get-ChildItem -Path C:\ -Recurse -Filter *.ex5 -ErrorAction SilentlyContinue
+        $file = Get-ChildItem -Path . -Recurse -Filter *.ex5 | Select-Object -First 1
+        if ($file) {
+            Copy-Item $file.FullName compiled\
+        } else {
+            Write-Error "Compilation failed"
+            exit 1
+        }
 
     - name: Upload EX5 artifact
       uses: actions/upload-artifact@v4
       with:
         name: compiled-ea
-        path: |
-          C:\Users\runneradmin\AppData\Roaming\MetaQuotes\Terminal\**\MQL5\Experts\*.ex5
+        path: compiled/
+
+    - name: Post Checkout repository
+      run: echo "Build complete"
