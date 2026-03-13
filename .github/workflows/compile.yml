@@ -10,7 +10,7 @@ jobs:
     steps:
 
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Download MetaTrader 5
       run: |
@@ -25,18 +25,29 @@ jobs:
         $path="C:\Program Files\MetaTrader 5\metaeditor64.exe"
         echo "METAEDITOR=$path" >> $env:GITHUB_ENV
 
+    - name: Locate MT5 Data Folder
+      run: |
+        $terminalRoot="$env:APPDATA\MetaQuotes\Terminal"
+        $terminal=Get-ChildItem $terminalRoot | Select-Object -First 1
+        $mql="$terminalRoot\$terminal\MQL5"
+        echo "MQLPATH=$mql" >> $env:GITHUB_ENV
+
+    - name: Prepare EA source
+      run: |
+        mkdir "$env:MQLPATH\Experts" -Force
+        Copy-Item EA_DANE_AUTO_BOT2.mq5 "$env:MQLPATH\Experts\"
+
     - name: Compile MQ5
       run: |
-        dir
-        & "$env:METAEDITOR" /compile:./EA_DANE_AUTO_BOT2.mq5 /log:compile.log
+        & "$env:METAEDITOR" /compile:"$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5" /log:compile.log
 
     - name: Show compiler log
       run: |
         Get-Content compile.log
 
-    - name: Search compiled EX5
+    - name: Find EX5
       run: |
-        $file = Get-ChildItem -Recurse -Filter *.ex5
+        $file = Get-ChildItem "$env:MQLPATH\Experts" -Recurse -Filter *.ex5
         if($file){
           mkdir compiled
           Copy-Item $file.FullName compiled\
@@ -46,7 +57,7 @@ jobs:
           exit 1
         }
 
-    - name: Upload EX5 artifact
+    - name: Upload EX5
       uses: actions/upload-artifact@v4
       with:
         name: compiled-ea
