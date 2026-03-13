@@ -3,28 +3,19 @@
 //+------------------------------------------------------------------+
 #property strict
 
-//---- Grid Settings
-input int      GridSize = 10;
-input int      SpacingPips = 500;
-input double   LotSize = 0.01;
-input bool     MoveGrid = true;
+input int GridSize = 10;
+input int SpacingPips = 500;
+input double LotSize = 0.01;
 
-//---- Trade Management
-input bool     TakeProfitPerTrade = true;
-input int      TakeProfitMultiplier = 1;
-input int      MaxProfitMultiplier = 5;
-input int      GridStopLossMultiplier = 10;
+input int TakeProfitMultiplier = 1;
+input int GridStopLossMultiplier = 10;
 
-//---- RSI Entry
-input int      RSIPeriod = 14;
-input int      RSI_BuyLevel = 40;
-input int      RSI_SellLevel = 60;
+input int RSIPeriod = 14;
+input int RSI_BuyLevel = 40;
+input int RSI_SellLevel = 60;
 
-//---- Moving Averages
-input int      FastMA = 50;
-input int      SlowMA = 200;
-input int      TrendMA1 = 100;
-input int      TrendMA2 = 300;
+input int FastMA = 50;
+input int SlowMA = 200;
 
 double spacing;
 double tp_distance;
@@ -41,40 +32,39 @@ int OnInit()
 //+------------------------------------------------------------------+
 double GetRSI()
 {
-   int handle = iRSI(_Symbol,_Period,RSIPeriod,PRICE_CLOSE);
-   double val[];
-   CopyBuffer(handle,0,1,1,val);
-   IndicatorRelease(handle);
-   return val[0];
+   int h = iRSI(_Symbol,_Period,RSIPeriod,PRICE_CLOSE);
+   double v[];
+   CopyBuffer(h,0,1,1,v);
+   IndicatorRelease(h);
+   return v[0];
 }
 //+------------------------------------------------------------------+
-double GetMA(int period)
+double GetMA(int p)
 {
-   int handle = iMA(_Symbol,_Period,period,0,MODE_EMA,PRICE_CLOSE);
-   double val[];
-   CopyBuffer(handle,0,1,1,val);
-   IndicatorRelease(handle);
-   return val[0];
+   int h = iMA(_Symbol,_Period,p,0,MODE_EMA,PRICE_CLOSE);
+   double v[];
+   CopyBuffer(h,0,1,1,v);
+   IndicatorRelease(h);
+   return v[0];
 }
 //+------------------------------------------------------------------+
 void SendOrder(ENUM_ORDER_TYPE type,double price,double sl,double tp)
 {
-   MqlTradeRequest req;
-   MqlTradeResult  res;
+   MqlTradeRequest r;
+   MqlTradeResult res;
 
-   ZeroMemory(req);
+   ZeroMemory(r);
    ZeroMemory(res);
 
-   req.action = TRADE_ACTION_PENDING;
-   req.symbol = _Symbol;
-   req.volume = LotSize;
-   req.type   = type;
-   req.price  = price;
-   req.sl     = sl;
-   req.tp     = tp;
-   req.deviation = 10;
+   r.action=TRADE_ACTION_PENDING;
+   r.symbol=_Symbol;
+   r.volume=LotSize;
+   r.type=type;
+   r.price=price;
+   r.sl=sl;
+   r.tp=tp;
 
-   OrderSend(req,res);
+   OrderSend(r,res);
 }
 //+------------------------------------------------------------------+
 void OpenGridBuy()
@@ -83,9 +73,9 @@ void OpenGridBuy()
 
    for(int i=0;i<GridSize;i++)
    {
-      double entry = price - (i*spacing);
-      double tp = entry + tp_distance;
-      double sl = entry - sl_distance;
+      double entry = price-(i*spacing);
+      double tp = entry+tp_distance;
+      double sl = entry-sl_distance;
 
       SendOrder(ORDER_TYPE_BUY_LIMIT,entry,sl,tp);
    }
@@ -97,9 +87,9 @@ void OpenGridSell()
 
    for(int i=0;i<GridSize;i++)
    {
-      double entry = price + (i*spacing);
-      double tp = entry - tp_distance;
-      double sl = entry + sl_distance;
+      double entry = price+(i*spacing);
+      double tp = entry-tp_distance;
+      double sl = entry+sl_distance;
 
       SendOrder(ORDER_TYPE_SELL_LIMIT,entry,sl,tp);
    }
@@ -107,7 +97,12 @@ void OpenGridSell()
 //+------------------------------------------------------------------+
 bool PositionsExist()
 {
-   if(PositionsTotal()>0) return true;
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket>0)
+         return true;
+   }
    return false;
 }
 //+------------------------------------------------------------------+
@@ -115,71 +110,75 @@ void CloseAllPositions()
 {
    for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      if(!PositionSelectByIndex(i)) continue;
+      ulong ticket = PositionGetTicket(i);
 
-      ulong ticket = PositionGetInteger(POSITION_TICKET);
+      if(ticket==0)
+         continue;
+
+      string sym = PositionGetString(POSITION_SYMBOL);
+      if(sym!=_Symbol)
+         continue;
+
       double volume = PositionGetDouble(POSITION_VOLUME);
       long type = PositionGetInteger(POSITION_TYPE);
 
-      MqlTradeRequest req;
-      MqlTradeResult  res;
+      MqlTradeRequest r;
+      MqlTradeResult res;
 
-      ZeroMemory(req);
+      ZeroMemory(r);
       ZeroMemory(res);
 
-      req.action = TRADE_ACTION_DEAL;
-      req.position = ticket;
-      req.symbol = _Symbol;
-      req.volume = volume;
+      r.action=TRADE_ACTION_DEAL;
+      r.position=ticket;
+      r.symbol=_Symbol;
+      r.volume=volume;
 
-      if(type == POSITION_TYPE_BUY)
+      if(type==POSITION_TYPE_BUY)
       {
-         req.type = ORDER_TYPE_SELL;
-         req.price = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+         r.type=ORDER_TYPE_SELL;
+         r.price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
       }
       else
       {
-         req.type = ORDER_TYPE_BUY;
-         req.price = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+         r.type=ORDER_TYPE_BUY;
+         r.price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
       }
 
-      OrderSend(req,res);
+      OrderSend(r,res);
    }
 }
 //+------------------------------------------------------------------+
-void CheckExitSignal()
+void CheckExit()
 {
    double fast = GetMA(FastMA);
    double slow = GetMA(SlowMA);
 
-   static double prev_fast=0;
-   static double prev_slow=0;
+   static double pf=0;
+   static double ps=0;
 
-   if(prev_fast!=0)
+   if(pf!=0)
    {
-      if((prev_fast<prev_slow && fast>slow) ||
-         (prev_fast>prev_slow && fast<slow))
-      {
+      if((pf<ps && fast>slow) || (pf>ps && fast<slow))
          CloseAllPositions();
-      }
    }
 
-   prev_fast=fast;
-   prev_slow=slow;
+   pf=fast;
+   ps=slow;
 }
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   CheckExitSignal();
+   CheckExit();
 
-   if(PositionsExist()) return;
+   if(PositionsExist())
+      return;
 
    double rsi = GetRSI();
 
    if(rsi < RSI_BuyLevel)
       OpenGridBuy();
 
-   else if(rsi > RSI_SellLevel)
+   if(rsi > RSI_SellLevel)
       OpenGridSell();
 }
 //+------------------------------------------------------------------+
