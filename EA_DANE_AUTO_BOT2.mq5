@@ -1,77 +1,71 @@
 //+------------------------------------------------------------------+
-//| EA SCALPING ROBOT/DANE FIXED (NO Trade.mqh)                     |
+//| EA SCALPING ROBOT/DANE - GITHUB COMPATIBLE                      |
 //+------------------------------------------------------------------+
 #property strict
 
-input int GridSize=10;
-input int SpacingPips=500;
-input double LotSize=0.01;
+//--- Grid Setup
+input int      GridSize=10;
+input int      SpacingPips=500;
+input double   LotSize=0.01;
 
-input int RSIPeriod=14;
-input int RSI_BuyLevel=40;
-input int RSI_SellLevel=60;
+//--- Trade Management
+input int      TakeProfitMultiplier=1;
+input int      MaxGridProfitMultiplier=5;
+input int      GridStopLossMultiplier=10;
 
-input int FastMA=50;
-input int SlowMA=200;
+//--- RSI Entry
+input int      RSIPeriod=14;
+input double   RSI_BuyLevel=40;
+input double   RSI_SellLevel=60;
 
-input int TakeProfitMultiplier=1;
-input int StopLossMultiplier=10;
+//--- Exit Signal
+input int      ExitMAFast=50;
+input int      ExitMASlow=200;
 
-input ulong Magic=3613;
+//--- General
+input ulong    MagicNumber=3613;
 
 double spacing;
-double tp_dist;
-double sl_dist;
+double tp_distance;
+double sl_distance;
+
+bool grid_active=false;
 
 //+------------------------------------------------------------------+
 int OnInit()
 {
    spacing = SpacingPips * _Point;
-   tp_dist = spacing * TakeProfitMultiplier;
-   sl_dist = spacing * StopLossMultiplier;
+   tp_distance = spacing * TakeProfitMultiplier;
+   sl_distance = spacing * GridStopLossMultiplier;
 
    return(INIT_SUCCEEDED);
 }
 //+------------------------------------------------------------------+
-bool GridExists()
-{
-   for(int i=0;i<OrdersTotal();i++)
-   {
-      ulong ticket=OrderGetTicket(i);
-
-      if(ticket==0)
-         continue;
-
-      if(OrderSelect(ticket))
-      {
-         if(OrderGetInteger(ORDER_MAGIC)==Magic &&
-            OrderGetString(ORDER_SYMBOL)==_Symbol)
-            return true;
-      }
-   }
-
-   return false;
-}
-//+------------------------------------------------------------------+
 double GetRSI()
 {
-   int h=iRSI(_Symbol,_Period,RSIPeriod,PRICE_CLOSE);
-   double r[];
-   CopyBuffer(h,0,1,1,r);
-   IndicatorRelease(h);
-   return r[0];
+   int handle=iRSI(_Symbol,_Period,RSIPeriod,PRICE_CLOSE);
+
+   double val[];
+   CopyBuffer(handle,0,1,1,val);
+
+   IndicatorRelease(handle);
+
+   return val[0];
 }
 //+------------------------------------------------------------------+
-double GetMA(int p)
+double GetMA(int period)
 {
-   int h=iMA(_Symbol,_Period,p,0,MODE_EMA,PRICE_CLOSE);
-   double r[];
-   CopyBuffer(h,0,1,1,r);
-   IndicatorRelease(h);
-   return r[0];
+   int handle=iMA(_Symbol,_Period,period,0,MODE_EMA,PRICE_CLOSE);
+
+   double val[];
+   CopyBuffer(handle,0,1,1,val);
+
+   IndicatorRelease(handle);
+
+   return val[0];
 }
 //+------------------------------------------------------------------+
-void SendPending(ENUM_ORDER_TYPE type,double entry,double sl,double tp)
+void SendPending(ENUM_ORDER_TYPE type,double price,double sl,double tp)
 {
    MqlTradeRequest req;
    MqlTradeResult res;
@@ -79,44 +73,48 @@ void SendPending(ENUM_ORDER_TYPE type,double entry,double sl,double tp)
    ZeroMemory(req);
    ZeroMemory(res);
 
-   req.action=TRADE_ACTION_PENDING;
-   req.symbol=_Symbol;
-   req.volume=LotSize;
-   req.type=type;
-   req.price=entry;
-   req.sl=sl;
-   req.tp=tp;
-   req.magic=Magic;
+   req.action = TRADE_ACTION_PENDING;
+   req.symbol = _Symbol;
+   req.volume = LotSize;
+   req.type = type;
+   req.price = price;
+   req.sl = sl;
+   req.tp = tp;
+   req.magic = MagicNumber;
 
    OrderSend(req,res);
 }
 //+------------------------------------------------------------------+
-void OpenGridSell()
-{
-   double price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-
-   for(int i=0;i<GridSize;i++)
-   {
-      double entry=price+(i*spacing);
-      double tp=entry-tp_dist;
-      double sl=entry+sl_dist;
-
-      SendPending(ORDER_TYPE_SELL_LIMIT,entry,sl,tp);
-   }
-}
-//+------------------------------------------------------------------+
-void OpenGridBuy()
+void OpenBuyGrid()
 {
    double price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
 
    for(int i=0;i<GridSize;i++)
    {
       double entry=price-(i*spacing);
-      double tp=entry+tp_dist;
-      double sl=entry-sl_dist;
+      double tp=entry+tp_distance;
+      double sl=entry-sl_distance;
 
       SendPending(ORDER_TYPE_BUY_LIMIT,entry,sl,tp);
    }
+
+   grid_active=true;
+}
+//+------------------------------------------------------------------+
+void OpenSellGrid()
+{
+   double price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+
+   for(int i=0;i<GridSize;i++)
+   {
+      double entry=price+(i*spacing);
+      double tp=entry-tp_distance;
+      double sl=entry+sl_distance;
+
+      SendPending(ORDER_TYPE_SELL_LIMIT,entry,sl,tp);
+   }
+
+   grid_active=true;
 }
 //+------------------------------------------------------------------+
 void ClosePosition(ulong ticket,long type,double volume)
@@ -131,7 +129,7 @@ void ClosePosition(ulong ticket,long type,double volume)
    req.position=ticket;
    req.symbol=_Symbol;
    req.volume=volume;
-   req.magic=Magic;
+   req.magic=MagicNumber;
 
    if(type==POSITION_TYPE_BUY)
    {
@@ -147,54 +145,110 @@ void ClosePosition(ulong ticket,long type,double volume)
    OrderSend(req,res);
 }
 //+------------------------------------------------------------------+
-void CheckExit()
+void CloseAllPositions()
 {
-   static double pf=0;
-   static double ps=0;
-
-   double f=GetMA(FastMA);
-   double s=GetMA(SlowMA);
-
-   if(pf!=0)
+   for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      if((pf<s && f>s) || (pf>s && f<s))
+      ulong ticket=PositionGetTicket(i);
+
+      if(PositionGetInteger(POSITION_MAGIC)!=MagicNumber)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol)
+         continue;
+
+      long type=PositionGetInteger(POSITION_TYPE);
+      double vol=PositionGetDouble(POSITION_VOLUME);
+
+      ClosePosition(ticket,type,vol);
+   }
+}
+//+------------------------------------------------------------------+
+double CalculateGridProfit()
+{
+   double profit=0;
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+
+      if(PositionGetInteger(POSITION_MAGIC)!=MagicNumber)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol)
+         continue;
+
+      profit+=PositionGetDouble(POSITION_PROFIT);
+   }
+
+   return profit;
+}
+//+------------------------------------------------------------------+
+void CheckExitSignal()
+{
+   static double prev_fast=0;
+   static double prev_slow=0;
+
+   double fast=GetMA(ExitMAFast);
+   double slow=GetMA(ExitMASlow);
+
+   if(prev_fast!=0)
+   {
+      if((prev_fast<prev_slow && fast>slow) ||
+         (prev_fast>prev_slow && fast<slow))
       {
-         for(int i=PositionsTotal()-1;i>=0;i--)
-         {
-            ulong ticket=PositionGetTicket(i);
-            string sym=PositionGetString(POSITION_SYMBOL);
-
-            if(sym!=_Symbol)
-               continue;
-
-            if(PositionGetInteger(POSITION_MAGIC)!=Magic)
-               continue;
-
-            long type=PositionGetInteger(POSITION_TYPE);
-            double vol=PositionGetDouble(POSITION_VOLUME);
-
-            ClosePosition(ticket,type,vol);
-         }
+         CloseAllPositions();
+         grid_active=false;
       }
    }
 
-   pf=f;
-   ps=s;
+   prev_fast=fast;
+   prev_slow=slow;
+}
+//+------------------------------------------------------------------+
+int CountEAOrders()
+{
+   int total=0;
+
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      if(PositionGetTicket(i))
+      {
+         if(PositionGetInteger(POSITION_MAGIC)==MagicNumber &&
+            PositionGetString(POSITION_SYMBOL)==_Symbol)
+            total++;
+      }
+   }
+
+   return total;
 }
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   CheckExit();
+   CheckExitSignal();
 
-   if(GridExists())
+   if(CountEAOrders()==0)
+      grid_active=false;
+
+   double profit=CalculateGridProfit();
+   double target_profit=MaxGridProfitMultiplier*spacing;
+
+   if(profit>=target_profit)
+   {
+      CloseAllPositions();
+      grid_active=false;
+      return;
+   }
+
+   if(grid_active)
       return;
 
    double rsi=GetRSI();
 
-   if(rsi>RSI_SellLevel)
-      OpenGridSell();
+   if(rsi<=RSI_BuyLevel)
+      OpenBuyGrid();
 
-   if(rsi<RSI_BuyLevel)
-      OpenGridBuy();
+   if(rsi>=RSI_SellLevel)
+      OpenSellGrid();
 }
 //+------------------------------------------------------------------+
