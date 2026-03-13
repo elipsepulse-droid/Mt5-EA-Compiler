@@ -1,7 +1,6 @@
 name: MT5 EA Compile
 
 on:
-  push:
   workflow_dispatch:
 
 jobs:
@@ -22,42 +21,33 @@ jobs:
         Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
 
     - name: Locate MetaEditor
-      id: locate
       run: |
-        $path1 = "C:\Program Files\MetaTrader 5\metaeditor64.exe"
-        $path2 = "C:\Program Files (x86)\MetaTrader 5\metaeditor.exe"
-
-        if (Test-Path $path1) {
-            echo "METAEDITOR=$path1" >> $env:GITHUB_ENV
-        }
-        elseif (Test-Path $path2) {
-            echo "METAEDITOR=$path2" >> $env:GITHUB_ENV
-        }
-        else {
-            Write-Error "MetaEditor not found"
-            exit 1
-        }
+        $path="C:\Program Files\MetaTrader 5\metaeditor64.exe"
+        echo "METAEDITOR=$path" >> $env:GITHUB_ENV
 
     - name: Compile MQ5
       run: |
-        mkdir compiled
-        & "$env:METAEDITOR" /compile:EA_DANE_AUTO_BOT2.mq5 /log:compile.log
+        dir
+        & "$env:METAEDITOR" /compile:./EA_DANE_AUTO_BOT2.mq5 /log:compile.log
+
+    - name: Show compiler log
+      run: |
+        Get-Content compile.log
 
     - name: Search compiled EX5
       run: |
-        $file = Get-ChildItem -Path . -Recurse -Filter *.ex5 | Select-Object -First 1
-        if ($file) {
-            Copy-Item $file.FullName compiled\
-        } else {
-            Write-Error "Compilation failed"
-            exit 1
+        $file = Get-ChildItem -Recurse -Filter *.ex5
+        if($file){
+          mkdir compiled
+          Copy-Item $file.FullName compiled\
+        }
+        else{
+          Write-Error "Compilation failed"
+          exit 1
         }
 
     - name: Upload EX5 artifact
       uses: actions/upload-artifact@v4
       with:
         name: compiled-ea
-        path: compiled/
-
-    - name: Post Checkout repository
-      run: echo "Build complete"
+        path: compiled
