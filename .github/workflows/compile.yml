@@ -22,20 +22,22 @@ jobs:
 
     - name: Locate MetaEditor
       run: |
-        $path="C:\Program Files\MetaTrader 5\metaeditor64.exe"
-        echo "METAEDITOR=$path" >> $env:GITHUB_ENV
+        $editor="C:\Program Files\MetaTrader 5\metaeditor64.exe"
+        echo "METAEDITOR=$editor" >> $env:GITHUB_ENV
 
-    - name: Locate MT5 Data Folder
+    - name: Locate MT5 Terminal Folder
       run: |
         $terminalRoot="$env:APPDATA\MetaQuotes\Terminal"
-        $terminal=Get-ChildItem $terminalRoot | Select-Object -First 1
-        $mql="$terminalRoot\$terminal\MQL5"
+        $folder=Get-ChildItem $terminalRoot | Where-Object {$_.PSIsContainer} | Select-Object -First 1
+        $mql="$terminalRoot\$($folder.Name)\MQL5"
+
         echo "MQLPATH=$mql" >> $env:GITHUB_ENV
 
     - name: Prepare EA source
       run: |
-        mkdir "$env:MQLPATH\Experts" -Force
-        Copy-Item EA_DANE_AUTO_BOT2.mq5 "$env:MQLPATH\Experts\"
+        $experts="$env:MQLPATH\Experts"
+        New-Item -ItemType Directory -Force -Path $experts
+        Copy-Item EA_DANE_AUTO_BOT2.mq5 $experts
 
     - name: Compile MQ5
       run: |
@@ -47,9 +49,9 @@ jobs:
 
     - name: Find EX5
       run: |
-        $file = Get-ChildItem "$env:MQLPATH\Experts" -Recurse -Filter *.ex5
+        $file = Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
         if($file){
-          mkdir compiled
+          New-Item -ItemType Directory -Force -Path compiled
           Copy-Item $file.FullName compiled\
         }
         else{
