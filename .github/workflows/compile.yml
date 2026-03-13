@@ -1,4 +1,4 @@
-name: MT5 EA Compile
+name: Compile MT5 EA
 
 on:
   workflow_dispatch:
@@ -16,52 +16,50 @@ jobs:
       run: |
         Invoke-WebRequest https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe -OutFile mt5setup.exe
 
-    - name: Install MetaTrader 5
+    - name: Install MT5
       run: |
         Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
 
-    - name: Locate MetaEditor
+    - name: Set MetaEditor
       run: |
-        $editor="C:\Program Files\MetaTrader 5\metaeditor64.exe"
-        echo "METAEDITOR=$editor" >> $env:GITHUB_ENV
+        echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
 
-    - name: Detect MT5 Data Folder
+    - name: Download MQL5 Include Library
       run: |
-        $root="$env:APPDATA\MetaQuotes\Terminal"
-        $folder=Get-ChildItem $root | Where-Object {$_.PSIsContainer} | Select-Object -First 1
-        $data="$root\$($folder.Name)"
-        $mql="$data\MQL5"
+        git clone https://github.com/EA31337/EA31337-classes.git mql_lib
 
-        echo "MT5DATA=$data" >> $env:GITHUB_ENV
+    - name: Prepare MQL5 folders
+      run: |
+        $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\MQL5"
+        New-Item -ItemType Directory -Force -Path "$mql\Experts"
+        New-Item -ItemType Directory -Force -Path "$mql\Include"
+
+        Copy-Item EA_DANE_AUTO_BOT2.mq5 "$mql\Experts\EA_DANE_AUTO_BOT2.mq5"
+
+        Copy-Item -Recurse mql_lib\* "$mql\Include"
+
         echo "MQLPATH=$mql" >> $env:GITHUB_ENV
 
-    - name: Copy EA into terminal
+    - name: Compile EA
       run: |
-        $experts="$env:MQLPATH\Experts"
-        New-Item -ItemType Directory -Force -Path $experts
-        Copy-Item EA_DANE_AUTO_BOT2.mq5 "$experts\EA_DANE_AUTO_BOT2.mq5"
+        & "$env:METAEDITOR" /compile:"$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5" /log:compile.log
 
-    - name: Compile Expert Advisor
-      run: |
-        & "$env:METAEDITOR" /portable /compile:"$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5" /log:compile.log
-
-    - name: Show compiler log
+    - name: Show log
       run: |
         Get-Content compile.log
 
-    - name: Collect compiled EX5
+    - name: Find EX5
       run: |
         $file = Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
         if($file){
-          New-Item -ItemType Directory -Force -Path compiled
+          New-Item -ItemType Directory -Force compiled
           Copy-Item $file.FullName compiled\
-        }
-        else{
+        } else {
           Write-Error "Compilation failed"
           exit 1
         }
 
-    - name: Upload compiled EA
+    - name: Upload EX5
       uses: actions/upload-artifact@v4
       with:
         name: compiled-ea
