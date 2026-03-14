@@ -22,7 +22,7 @@ jobs:
       run: |
         Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
 
-    - name: Set MetaEditor path
+    - name: Set MetaEditor and Terminal paths
       shell: pwsh
       run: |
         echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
@@ -86,7 +86,6 @@ jobs:
         $text=$content -join "`n"
 
         $lines=$content.Count
-
         $functions=[regex]::Matches($text,"(void|int|double|bool|string|datetime)\s+[A-Za-z0-9_]+\s*\(").Count
         $classes=[regex]::Matches($text,"\bclass\s+[A-Za-z0-9_]+").Count
         $structs=[regex]::Matches($text,"\bstruct\s+[A-Za-z0-9_]+").Count
@@ -117,7 +116,6 @@ jobs:
         $ontrade=[regex]::Matches($text,"OnTrade").Count
 
         $log=Get-Content compile.log
-
         $errorLines=$log | Select-String -Pattern "error"
         $warningLines=$log | Select-String -Pattern "warning"
 
@@ -184,9 +182,17 @@ jobs:
     - name: Collect Backtest Results
       shell: pwsh
       run: |
+
         New-Item -ItemType Directory -Force results
 
-        Copy-Item "$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\Files\backtest_report.*" results\ -ErrorAction SilentlyContinue
+        $testerPath="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\Tester"
+
+        if(Test-Path $testerPath){
+            Get-ChildItem $testerPath -Recurse -Include *.html,*.xml,*.csv |
+            Copy-Item -Destination results -Force
+        }
+
+        Get-ChildItem results
 
     - name: Locate EX5
       shell: pwsh
@@ -214,3 +220,4 @@ jobs:
       with:
         name: backtest-results
         path: results
+        if-no-files-found: ignore
