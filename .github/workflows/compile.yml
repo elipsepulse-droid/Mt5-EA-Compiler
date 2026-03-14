@@ -1,15 +1,15 @@
-name: MT5 EA Compile + Analysis + Backtest
+name: MT5 EA Compile + Code Analysis + Backtest Log
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-test:
+  mt5:
     runs-on: windows-latest
 
     steps:
 
-    - name: Checkout repository
+    - name: Checkout Repository
       uses: actions/checkout@v4
 
     - name: Download MetaTrader 5
@@ -22,92 +22,125 @@ jobs:
       run: |
         Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
 
-    - name: Configure environment
+    - name: Detect MT5 Data Folder
       shell: pwsh
       run: |
-        echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
-        echo "TERMINAL=C:\Program Files\MetaTrader 5\terminal64.exe" >> $env:GITHUB_ENV
-
-        $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\MQL5"
-
-        New-Item -ItemType Directory -Force -Path "$mql\Experts"
-
-        Copy-Item EA_DANE_AUTO_BOT2.mq5 "$mql\Experts\EA_DANE_AUTO_BOT2.mq5"
+        $terminal = Get-ChildItem "$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal" | Select-Object -First 1
+        $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\$($terminal.Name)\MQL5"
+        New-Item -ItemType Directory -Force "$mql\Experts"
+        Copy-Item *.mq5 "$mql\Experts\" -Force
 
         echo "MQLPATH=$mql" >> $env:GITHUB_ENV
-
-    - name: Prepare result folders
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Force results
-        New-Item -ItemType Directory -Force compiled
-
-    - name: Create Strategy Tester configuration
-      shell: pwsh
-      run: |
-        $reportPath="${{ github.workspace }}\results\backtest_report"
-
-        @"
-        [Common]
-        Login=0
-        Password=
-        Server=
-
-        [Tester]
-        TestExpert=EA_DANE_AUTO_BOT2
-        Symbol=XAUUSD
-        Period=M5
-        Model=0
-        Optimization=0
-        FromDate=2022.01.01
-        ToDate=2025.01.01
-        Deposit=10000
-        Currency=USD
-        Leverage=100
-        ExecutionMode=0
-        ReplaceReport=1
-        Report=$reportPath
-        ShutdownTerminal=1
-        "@ | Out-File tester.ini -Encoding ASCII
+        echo "TERMINAL=C:\Program Files\MetaTrader 5\terminal64.exe" >> $env:GITHUB_ENV
+        echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
 
     - name: Compile EA
       shell: pwsh
       run: |
-        & "$env:METAEDITOR" /compile:"$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5" /log:compile.log
+        $mq5 = Get-ChildItem "$env:MQLPATH\Experts\*.mq5" | Select-Object -First 1
+        & "$env:METAEDITOR" /compile:$mq5.FullName /log:compile.log
 
-    - name: Show compile log
+    - name: Print Compilation Log
       shell: pwsh
       run: |
         Get-Content compile.log
 
+    - name: Static Code Analysis
+      shell: pwsh
+      run: |
+
+        $file = Get-ChildItem "$env:MQLPATH\Experts\*.mq5" | Select-Object -First 1
+        $code = Get-Content $file.FullName
+
+        $lines = $code.Count
+        $functions = ($code | Select-String "void |int |double |bool ").Count
+        $includes = ($code | Select-String "#include").Count
+        $classes = ($code | Select-String "class ").Count
+        $structs = ($code | Select-String "struct ").Count
+        $enums = ($code | Select-String "enum ").Count
+        $inputs = ($code | Select-String "input ").Count
+        $globals = ($code | Select-String "extern ").Count
+
+        $ordersend = ($code | Select-String "OrderSend").Count
+        $buy = ($code | Select-String "ORDER_TYPE_BUY").Count
+        $sell = ($code | Select-String "ORDER_TYPE_SELL").Count
+        $pending = ($code | Select-String "LIMIT|STOP").Count
+        $close = ($code | Select-String "PositionClose").Count
+
+        echo "================ BASIC ANALYSIS ================"
+        echo "Total Lines: $lines"
+        echo "Function Count: $functions"
+        echo "Include Files: $includes"
+        echo "Classes: $classes"
+        echo "Structures: $structs"
+        echo "Enumerations: $enums"
+        echo "Global Variables: $globals"
+        echo "Input Parameters: $inputs"
+
+        echo ""
+        echo "================ TRADING DETECTION ================"
+        echo "OrderSend Calls: $ordersend"
+        echo "Buy Order Calls: $buy"
+        echo "Sell Order Calls: $sell"
+        echo "Pending Order Patterns: $pending"
+        echo "PositionClose Calls: $close"
+
+        if($ordersend -gt 5){
+          echo "Risk Flag: Grid or high frequency trading detected"
+        }
+
     - name: Run Strategy Tester
       shell: pwsh
       run: |
-        & "$env:TERMINAL" /portable /config:tester.ini
-        Start-Sleep -Seconds 20
 
-    - name: Verify backtest results
+        $config=@"
+[Tester]
+Expert=EA_DANE_AUTO_BOT2
+Symbol=XAUUSD
+Period=M5
+Model=0
+Optimization=0
+FromDate=2023.01.01
+ToDate=2024.01.01
+Deposit=10000
+Currency=USD
+Leverage=100
+ExecutionMode=0
+ShutdownTerminal=1
+"@
+
+        $config | Out-File tester.ini -Encoding ASCII
+
+        & "$env:TERMINAL" /portable /config:tester.ini
+
+        Start-Sleep 60
+
+    - name: Print Tester Logs
       shell: pwsh
       run: |
-        Get-ChildItem results
+
+        $logpath="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal"
+
+        $testerLogs = Get-ChildItem $logpath -Recurse -Filter *.log | Sort-Object LastWriteTime -Descending | Select-Object -First 3
+
+        echo ""
+        echo "================ BACKTEST LOG OUTPUT ================"
+
+        foreach($log in $testerLogs){
+          echo ""
+          echo "Log File: $($log.FullName)"
+          Get-Content $log.FullName -Tail 50
+        }
 
     - name: Locate EX5
       shell: pwsh
       run: |
-        $file = Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
+        New-Item -ItemType Directory -Force compiled
+        $ex5 = Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
+        Copy-Item $ex5.FullName compiled\
 
-        if($file){
-          Copy-Item $file.FullName compiled\
-        }
-
-    - name: Upload compiled EA
+    - name: Upload Compiled EA
       uses: actions/upload-artifact@v4
       with:
         name: compiled-ex5
         path: compiled
-
-    - name: Upload Backtest Results
-      uses: actions/upload-artifact@v4
-      with:
-        name: backtest-results
-        path: results
