@@ -22,50 +22,53 @@ jobs:
       run: |
         Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
 
-    - name: Set MetaEditor and Terminal paths
+    - name: Set MT5 paths
       shell: pwsh
       run: |
         echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
         echo "TERMINAL=C:\Program Files\MetaTrader 5\terminal64.exe" >> $env:GITHUB_ENV
 
-    - name: Prepare MT5 directories
+    - name: Prepare MT5 folders
       shell: pwsh
       run: |
+
         $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\MQL5"
 
         New-Item -ItemType Directory -Force -Path "$mql\Experts"
-        New-Item -ItemType Directory -Force -Path "$mql\Include"
         New-Item -ItemType Directory -Force -Path "$mql\Files"
 
         Copy-Item EA_DANE_AUTO_BOT2.mq5 "$mql\Experts\EA_DANE_AUTO_BOT2.mq5"
 
         echo "MQLPATH=$mql" >> $env:GITHUB_ENV
 
-    - name: Create Strategy Tester configuration
+    - name: Create Strategy Tester config
       shell: pwsh
       run: |
-        @"
-        [Common]
-        Login=0
-        Password=
-        Server=
 
-        [Tester]
-        TestExpert=EA_DANE_AUTO_BOT2
-        Symbol=XAUUSD
-        Period=M5
-        Model=0
-        Optimization=1
-        FromDate=2022.01.01
-        ToDate=2025.01.01
-        Deposit=10000
-        Currency=USD
-        Leverage=100
-        ExecutionMode=0
-        ReplaceReport=1
-        Report=backtest_report
-        ShutdownTerminal=1
-        "@ | Out-File tester.ini -Encoding ASCII
+        $reportPath="$env:USERPROFILE\backtest_report"
+
+        @"
+[Common]
+Login=0
+Password=
+Server=
+
+[Tester]
+TestExpert=EA_DANE_AUTO_BOT2
+Symbol=XAUUSD
+Period=M5
+Model=0
+Optimization=0
+FromDate=2022.01.01
+ToDate=2025.01.01
+Deposit=10000
+Currency=USD
+Leverage=100
+ExecutionMode=0
+ReplaceReport=1
+Report=$reportPath
+ShutdownTerminal=1
+"@ | Out-File tester.ini -Encoding ASCII
 
     - name: Compile EA
       shell: pwsh
@@ -93,27 +96,14 @@ jobs:
         $globals=[regex]::Matches($text,"^(int|double|bool|string|datetime)\s+[A-Za-z0-9_]+\s*=").Count
         $inputs=[regex]::Matches($text,"\binput\s+").Count
         $includes=[regex]::Matches($text,"#include").Count
-        $libraries=[regex]::Matches($text,"#import").Count
-        $resources=[regex]::Matches($text,"#resource").Count
 
         $orderSend=[regex]::Matches($text,"OrderSend\s*\(").Count
-        $orderSendAsync=[regex]::Matches($text,"OrderSendAsync\s*\(").Count
         $buy=[regex]::Matches($text,"ORDER_TYPE_BUY|trade\.Buy").Count
         $sell=[regex]::Matches($text,"ORDER_TYPE_SELL|trade\.Sell").Count
-        $pending=[regex]::Matches($text,"ORDER_TYPE_BUY_LIMIT|ORDER_TYPE_SELL_LIMIT|ORDER_TYPE_BUY_STOP|ORDER_TYPE_SELL_STOP").Count
         $close=[regex]::Matches($text,"PositionClose").Count
-        $tradereq=[regex]::Matches($text,"MqlTradeRequest").Count
-        $risk=[regex]::Matches($text,"risk|lot|stoploss|takeprofit").Count
-
-        $indicators=[regex]::Matches($text,"iMA|iRSI|iMACD|iBands|iATR").Count
-        $tradeclass=[regex]::Matches($text,"CTrade").Count
-        $timer=[regex]::Matches($text,"EventSetTimer").Count
 
         $oninit=[regex]::Matches($text,"OnInit").Count
-        $ondeinit=[regex]::Matches($text,"OnDeinit").Count
         $ontick=[regex]::Matches($text,"OnTick").Count
-        $ontimer=[regex]::Matches($text,"OnTimer").Count
-        $ontrade=[regex]::Matches($text,"OnTrade").Count
 
         $log=Get-Content compile.log
         $errorLines=$log | Select-String -Pattern "error"
@@ -132,8 +122,6 @@ jobs:
         Write-Host "Number of global variables: $globals"
         Write-Host "Number of input parameters: $inputs"
         Write-Host "Number of include files: $includes"
-        Write-Host "Number of libraries used: $libraries"
-        Write-Host "Number of resource files: $resources"
 
         Write-Host ""
         Write-Host "================ ERROR INFORMATION ================"
@@ -146,38 +134,25 @@ jobs:
         Write-Host ""
         Write-Host "================ TRADING RELATED DETECTION ================"
         Write-Host "OrderSend usage: $orderSend"
-        Write-Host "OrderSendAsync usage: $orderSendAsync"
         Write-Host "Buy order functions: $buy"
         Write-Host "Sell order functions: $sell"
-        Write-Host "Pending order functions: $pending"
         Write-Host "PositionClose calls: $close"
-        Write-Host "Trade request structures: $tradereq"
-        Write-Host "Risk management variables: $risk"
 
         Write-Host ""
-        Write-Host "================ FUNCTION USAGE ================"
-        Write-Host "Indicator calls: $indicators"
-        Write-Host "Trade class usage: $tradeclass"
-        Write-Host "Timer functions: $timer"
+        Write-Host "================ EVENT FUNCTIONS ================"
         Write-Host "OnInit events: $oninit"
-        Write-Host "OnDeinit events: $ondeinit"
         Write-Host "OnTick events: $ontick"
-        Write-Host "OnTimer events: $ontimer"
-        Write-Host "OnTrade events: $ontrade"
 
         Write-Host ""
         Write-Host "================ FINAL COMPILATION SUMMARY ================"
         Write-Host "Total errors: $errorCount"
         Write-Host "Total warnings: $warningCount"
 
-        if($errorCount -eq 0){
-          Write-Host "Successful compilation message: Compilation finished without critical errors"
-        }
-
     - name: Run Strategy Tester
       shell: pwsh
       run: |
         & "$env:TERMINAL" /portable /config:tester.ini
+        Start-Sleep -Seconds 20
 
     - name: Collect Backtest Results
       shell: pwsh
@@ -185,18 +160,16 @@ jobs:
 
         New-Item -ItemType Directory -Force results
 
-        $testerPath="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\Tester"
+        Get-ChildItem "$env:USERPROFILE" -Recurse -Include backtest_report*.html,backtest_report*.xml,backtest_report*.csv -ErrorAction SilentlyContinue |
+        Copy-Item -Destination results -Force
 
-        if(Test-Path $testerPath){
-            Get-ChildItem $testerPath -Recurse -Include *.html,*.xml,*.csv |
-            Copy-Item -Destination results -Force
-        }
-
+        Write-Host "Collected files:"
         Get-ChildItem results
 
     - name: Locate EX5
       shell: pwsh
       run: |
+
         $file=Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
 
         if($file){
