@@ -48,10 +48,10 @@ jobs:
       run: |
         Get-Content compile.log
 
-    - name: Backtesting Configuration
+    - name: Create Tester Config
       shell: pwsh
       run: |
-        $tester = @"
+        $config=@"
 [Common]
 Login=0
 Password=
@@ -66,75 +66,60 @@ ToDate=2025.01.01
 Deposit=10000
 Currency=USD
 Leverage=100
-Report=backtest_report
+Report=backtest
 ReplaceReport=1
 ShutdownTerminal=1
 "@
 
-        $tester | Out-File tester.ini -Encoding ASCII
+        $config | Out-File tester.ini -Encoding ASCII
+        Get-Content tester.ini
 
     - name: Run Strategy Tester
       shell: pwsh
       run: |
-        & "$env:TERMINAL" /portable /config:tester.ini
-        Start-Sleep -Seconds 30
+        $terminal="$env:TERMINAL"
 
-    - name: Parse Backtest Results
+        Start-Process `
+        -FilePath $terminal `
+        -ArgumentList "/portable","/config:tester.ini" `
+        -Wait
+
+    - name: Locate Backtest Report
       shell: pwsh
       run: |
-
         Write-Host ""
-        Write-Host "================ BACKTEST SUMMARY ================"
+        Write-Host "================ BACKTEST RESULTS ================"
 
-        $report = Get-ChildItem -Recurse -Filter "backtest_report*.html" -ErrorAction SilentlyContinue
+        $report = Get-ChildItem -Path "C:\" -Recurse -Filter "backtest*.html" -ErrorAction SilentlyContinue | Select-Object -First 1
 
         if($report){
+            Write-Host "Backtest report found:"
+            Write-Host $report.FullName
 
-          $content = Get-Content $report.FullName
+            $content = Get-Content $report.FullName
 
-          function Extract($pattern){
-            $match = $content | Select-String $pattern | Select -First 1
-            if($match){ return $match.Line } else { return "Data not found" }
-          }
+            $metrics = @(
+              "Total Net Profit",
+              "Gross Profit",
+              "Gross Loss",
+              "Profit Factor",
+              "Expected Payoff",
+              "Recovery Factor",
+              "Sharpe Ratio",
+              "Total Trades",
+              "Short Trades",
+              "Long Trades",
+              "Balance Drawdown Maximal",
+              "Equity Drawdown Maximal"
+            )
 
-          Write-Host "Symbol: XAUUSD"
-          Write-Host "Timeframe: M5"
-          Write-Host "Test Period: 2022.01.01 - 2025.01.01"
+            foreach($m in $metrics){
+                $line = $content | Select-String $m | Select -First 1
+                if($line){ Write-Host $line.Line }
+            }
 
-          Write-Host ""
-          Write-Host "--------------- PERFORMANCE METRICS ---------------"
-          Write-Host (Extract "Total Net Profit")
-          Write-Host (Extract "Gross Profit")
-          Write-Host (Extract "Gross Loss")
-          Write-Host (Extract "Profit Factor")
-          Write-Host (Extract "Expected Payoff")
-          Write-Host (Extract "Recovery Factor")
-          Write-Host (Extract "Sharpe Ratio")
-
-          Write-Host ""
-          Write-Host "--------------- TRADE STATISTICS ---------------"
-          Write-Host (Extract "Total Trades")
-          Write-Host (Extract "Short Trades")
-          Write-Host (Extract "Long Trades")
-          Write-Host (Extract "Profit Trades")
-          Write-Host (Extract "Loss Trades")
-
-          Write-Host ""
-          Write-Host "--------------- RISK ANALYSIS ---------------"
-          Write-Host (Extract "Balance Drawdown Maximal")
-          Write-Host (Extract "Equity Drawdown Maximal")
-          Write-Host (Extract "Balance Drawdown Relative")
-          Write-Host (Extract "Equity Drawdown Relative")
-
-          Write-Host ""
-          Write-Host "--------------- EXECUTION DETAILS ---------------"
-          Write-Host (Extract "Ticks modelled")
-          Write-Host (Extract "Modeling quality")
-          Write-Host (Extract "Spread")
-
-        }
-        else{
-          Write-Host "Backtest report not found"
+        } else {
+            Write-Host "Backtest report not generated"
         }
 
     - name: Find EX5
