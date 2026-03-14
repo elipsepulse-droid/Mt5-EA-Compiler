@@ -44,9 +44,60 @@ jobs:
       run: |
         & "$env:METAEDITOR" /compile:"$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5" /log:compile.log
 
-    - name: Show log
+    - name: Show compile log
       run: |
         Get-Content compile.log
+
+    - name: Static Code Analysis
+      shell: pwsh
+      run: |
+        $file = "$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5"
+        $content = Get-Content $file
+        $text = $content -join "`n"
+
+        $totalLines = $content.Count
+
+        $functionMatches = [regex]::Matches($text,"(void|int|double|bool|string|datetime)\s+[A-Za-z0-9_]+\s*\(")
+        $functionCount = $functionMatches.Count
+
+        $includeMatches = [regex]::Matches($text,"#include")
+        $includeCount = $includeMatches.Count
+
+        $orderSendMatches = [regex]::Matches($text,"OrderSend\s*\(")
+        $orderSendCount = $orderSendMatches.Count
+
+        $buyMatches = [regex]::Matches($text,"ORDER_TYPE_BUY")
+        $buyCount = $buyMatches.Count
+
+        $sellMatches = [regex]::Matches($text,"ORDER_TYPE_SELL")
+        $sellCount = $sellMatches.Count
+
+        $gridFlag = "None"
+        if($text -match "grid" -or $orderSendCount -gt 5){
+          $gridFlag = "Grid strategy detected"
+        }
+
+        Write-Host ""
+        Write-Host "================ BASIC ANALYSIS ================"
+        Write-Host "Total Lines: $totalLines"
+        Write-Host "Function Count: $functionCount"
+        Write-Host "Include Files: $includeCount"
+
+        Write-Host ""
+        Write-Host "================ WARNING SCAN ================"
+        if($orderSendCount -gt 0){
+          Write-Host "Warning: OrderSend detected — ensure return value is checked"
+        }
+        else{
+          Write-Host "No OrderSend usage detected"
+        }
+
+        Write-Host ""
+        Write-Host "================ TRADING RISK ANALYSIS ================"
+        Write-Host "OrderSend Calls: $orderSendCount"
+        Write-Host "Buy Order Calls: $buyCount"
+        Write-Host "Sell Order Calls: $sellCount"
+        Write-Host "Risk Flag: $gridFlag"
 
     - name: Find EX5
       run: |
