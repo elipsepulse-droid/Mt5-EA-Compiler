@@ -1,119 +1,66 @@
 name: Compile MT5 EA
 
 on:
-workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
-build:
-runs-on: windows-latest
+  build:
+    runs-on: windows-latest
 
-```
-steps:
+    steps:
 
-- name: Checkout repository
-  uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-- name: Download MetaTrader 5
-  run: |
-    Invoke-WebRequest https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe -OutFile mt5setup.exe
+    - name: Download MetaTrader 5
+      run: |
+        Invoke-WebRequest https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe -OutFile mt5setup.exe
 
-- name: Install MT5
-  run: |
-    Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
+    - name: Install MT5
+      run: |
+        Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
 
-- name: Set MetaEditor
-  run: |
-    echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
+    - name: Set MetaEditor
+      run: |
+        echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
 
-- name: Prepare MQL5 folders
-  run: |
-    $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\MQL5"
-    New-Item -ItemType Directory -Force -Path "$mql\Experts"
-    Copy-Item EA_DANE_AUTO_BOT2.mq5 "$mql\Experts\EA_DANE_AUTO_BOT2.mq5"
-    echo "MQLPATH=$mql" >> $env:GITHUB_ENV
+    - name: Download MQL5 Include Library
+      run: |
+        git clone https://github.com/EA31337/EA31337-classes.git mql_lib
 
-- name: Compile EA
-  run: |
-    & "$env:METAEDITOR" /compile:"$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5" /log:compile.log
+    - name: Prepare MQL5 folders
+      run: |
+        $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\MQL5"
+        New-Item -ItemType Directory -Force -Path "$mql\Experts"
+        New-Item -ItemType Directory -Force -Path "$mql\Include"
 
-- name: Show compiler log
-  run: |
-    Get-Content compile.log
+        Copy-Item EA_DANE_AUTO_BOT2.mq5 "$mql\Experts\EA_DANE_AUTO_BOT2.mq5"
 
-- name: Parse compile results
-  run: |
-    $log = Get-Content compile.log
-    $errors = ($log | Select-String "error").Count
-    $warnings = ($log | Select-String "warning").Count
+        Copy-Item -Recurse mql_lib\* "$mql\Include"
 
-    Write-Host "Compilation Errors:" $errors
-    Write-Host "Compilation Warnings:" $warnings
+        echo "MQLPATH=$mql" >> $env:GITHUB_ENV
 
-    if($errors -gt 0){
-      Write-Error "Compilation failed"
-      exit 1
-    }
+    - name: Compile EA
+      run: |
+        & "$env:METAEDITOR" /compile:"$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5" /log:compile.log
 
-- name: Structured Risk Analysis
-  run: |
-    $code = Get-Content EA_DANE_AUTO_BOT2.mq5
+    - name: Show log
+      run: |
+        Get-Content compile.log
 
-    $grid = $false
-    $martingale = $false
-    $lotRisk = "LOW"
-    $tradeDensity = "LOW"
+    - name: Find EX5
+      run: |
+        $file = Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
+        if($file){
+          New-Item -ItemType Directory -Force compiled
+          Copy-Item $file.FullName compiled\
+        } else {
+          Write-Error "Compilation failed"
+          exit 1
+        }
 
-    if($code -match "Grid" -or $code -match "grid"){
-        $grid = $true
-    }
-
-    if($code -match "LotMultiplier" -or $code -match "Martingale"){
-        $martingale = $true
-    }
-
-    if($code -match "LotSize" -and $code -match "MaxLot"){
-        $lotRisk = "MEDIUM"
-    }
-
-    $orders = ($code | Select-String "OrderSend").Count
-    if($orders -gt 3){
-        $tradeDensity = "HIGH"
-    }
-
-    $report = @{
-        GridStrategy = $grid
-        MartingaleStrategy = $martingale
-        LotExposure = $lotRisk
-        OrderSendCalls = $orders
-        TradeDensityRisk = $tradeDensity
-    }
-
-    Write-Host ""
-    Write-Host "===== EA STRUCTURED RISK REPORT ====="
-    $report
-
-    $report | ConvertTo-Json | Out-File risk_report.json
-
-- name: Find EX5
-  run: |
-    $file = Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
-    if($file){
-      New-Item -ItemType Directory -Force compiled
-      Copy-Item $file.FullName compiled\
-    } else {
-      Write-Error "Compilation failed"
-      exit 1
-    }
-
-- name: Upload EX5
-  uses: actions/upload-artifact@v4
-  with:
-    name: compiled-ea
-    path: compiled
-
-- name: Upload Risk Report
-  uses: actions/upload-artifact@v4
-  with:
-    name: ea-risk-report
-    path: risk_report.json
-```
+    - name: Upload EX5
+      uses: actions/upload-artifact@v4
+      with:
+        name: compiled-ea
+        path: compiled
