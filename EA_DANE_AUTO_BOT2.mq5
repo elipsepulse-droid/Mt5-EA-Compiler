@@ -1,33 +1,28 @@
 //+------------------------------------------------------------------+
-//| Grid RSI EMA EA (MT5)                                           |
-//| Controlled execution / single signal entry                      |
+//| Grid RSI EMA EA (MT5) - Cloud Compile Safe                      |
+//| Uses native OrderSend (no Trade.mqh dependency)                 |
 //+------------------------------------------------------------------+
 #property strict
 
-#include <Trade/Trade.mqh>
-CTrade trade;
-
 //================ INPUT PARAMETERS =================//
 
-input double   LotSize = 0.01;
-input int      GridSize = 10;
-input int      GridSpacingPips = 500;
+input double LotSize = 0.01;
+input int GridSize = 10;
+input int GridSpacingPips = 500;
 
-input int      RSIPeriod = 14;
-input double   RSIBuyLevel = 40;
-input double   RSISellLevel = 60;
+input int RSIPeriod = 14;
+input double RSIBuyLevel = 40;
+input double RSISellLevel = 60;
 
-input int      FastTrendMA = 100;
-input int      SlowTrendMA = 300;
+input int FastTrendMA = 100;
+input int SlowTrendMA = 300;
 
-input int      ExitFastMA = 50;
-input int      ExitSlowMA = 200;
+input int ExitFastMA = 50;
+input int ExitSlowMA = 200;
 
-input double   TakeProfitSpacing = 1.0;
-input double   BasketProfitSpacing = 5.0;
-input double   BasketStopSpacing = 10.0;
-
-input bool     MoveGrid = true;
+input double TakeProfitSpacing = 1.0;
+input double BasketProfitSpacing = 5.0;
+input double BasketStopSpacing = 10.0;
 
 //================ GLOBAL VARIABLES =================//
 
@@ -40,8 +35,8 @@ int exitSlowHandle;
 double pip;
 double gridSpacing;
 
-double lastBuyPrice = 0;
-double lastSellPrice = 0;
+double lastBuyPrice=0;
+double lastSellPrice=0;
 
 bool buyGridActive=false;
 bool sellGridActive=false;
@@ -52,29 +47,29 @@ datetime lastSignalBar=0;
 
 int OnInit()
 {
-   pip = _Point;
+   pip=_Point;
    if(_Digits==3 || _Digits==5)
-      pip = _Point*10;
+      pip=_Point*10;
 
    gridSpacing = GridSpacingPips * pip;
 
    rsiHandle = iRSI(_Symbol,_Period,RSIPeriod,PRICE_CLOSE);
-
    fastMAHandle = iMA(_Symbol,_Period,FastTrendMA,0,MODE_EMA,PRICE_CLOSE);
    slowMAHandle = iMA(_Symbol,_Period,SlowTrendMA,0,MODE_EMA,PRICE_CLOSE);
-
    exitFastHandle = iMA(_Symbol,_Period,ExitFastMA,0,MODE_EMA,PRICE_CLOSE);
    exitSlowHandle = iMA(_Symbol,_Period,ExitSlowMA,0,MODE_EMA,PRICE_CLOSE);
 
    return(INIT_SUCCEEDED);
 }
 
-//================ DATA ACCESS =================//
+//================ BUFFER VALUE =================//
 
-double GetBufferValue(int handle,int shift)
+double GetVal(int handle,int shift)
 {
    double val[];
-   CopyBuffer(handle,0,shift,1,val);
+   if(CopyBuffer(handle,0,shift,1,val)<=0)
+      return(0);
+
    return val[0];
 }
 
@@ -86,14 +81,16 @@ int CountPositions(int type)
 
    for(int i=0;i<PositionsTotal();i++)
    {
-      ulong ticket=PositionGetTicket(i);
-
-      if(PositionGetString(POSITION_SYMBOL)==_Symbol)
+      if(PositionGetTicket(i))
       {
-         if(PositionGetInteger(POSITION_TYPE)==type)
+         if(PositionGetString(POSITION_SYMBOL)==_Symbol &&
+            PositionGetInteger(POSITION_TYPE)==type)
+         {
             total++;
+         }
       }
    }
+
    return total;
 }
 
@@ -115,6 +112,81 @@ double BasketProfit()
    return profit;
 }
 
+//================ ORDER FUNCTIONS =================//
+
+bool OpenBuy(double volume,double tp)
+{
+   MqlTradeRequest req;
+   MqlTradeResult res;
+
+   ZeroMemory(req);
+   ZeroMemory(res);
+
+   req.action=TRADE_ACTION_DEAL;
+   req.symbol=_Symbol;
+   req.volume=volume;
+   req.type=ORDER_TYPE_BUY;
+   req.price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   req.tp=tp;
+   req.deviation=20;
+
+   return OrderSend(req,res);
+}
+
+bool OpenSell(double volume,double tp)
+{
+   MqlTradeRequest req;
+   MqlTradeResult res;
+
+   ZeroMemory(req);
+   ZeroMemory(res);
+
+   req.action=TRADE_ACTION_DEAL;
+   req.symbol=_Symbol;
+   req.volume=volume;
+   req.type=ORDER_TYPE_SELL;
+   req.price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   req.tp=tp;
+   req.deviation=20;
+
+   return OrderSend(req,res);
+}
+
+//================ CLOSE POSITION =================//
+
+void ClosePosition(ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket))
+      return;
+
+   MqlTradeRequest req;
+   MqlTradeResult res;
+
+   ZeroMemory(req);
+   ZeroMemory(res);
+
+   ENUM_POSITION_TYPE type=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+   req.action=TRADE_ACTION_DEAL;
+   req.position=ticket;
+   req.symbol=_Symbol;
+   req.volume=PositionGetDouble(POSITION_VOLUME);
+   req.deviation=20;
+
+   if(type==POSITION_TYPE_BUY)
+   {
+      req.type=ORDER_TYPE_SELL;
+      req.price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   }
+   else
+   {
+      req.type=ORDER_TYPE_BUY;
+      req.price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   }
+
+   OrderSend(req,res);
+}
+
 //================ CLOSE ALL =================//
 
 void CloseAll()
@@ -124,9 +196,7 @@ void CloseAll()
       ulong ticket=PositionGetTicket(i);
 
       if(PositionGetString(POSITION_SYMBOL)==_Symbol)
-      {
-         trade.PositionClose(ticket);
-      }
+         ClosePosition(ticket);
    }
 
    buyGridActive=false;
@@ -144,11 +214,11 @@ void CheckEntrySignal()
 
    lastSignalBar=bar;
 
-   double rsiPrev=GetBufferValue(rsiHandle,2);
-   double rsiCur=GetBufferValue(rsiHandle,1);
+   double rsiPrev=GetVal(rsiHandle,2);
+   double rsiCur=GetVal(rsiHandle,1);
 
-   double fastMA=GetBufferValue(fastMAHandle,1);
-   double slowMA=GetBufferValue(slowMAHandle,1);
+   double fastMA=GetVal(fastMAHandle,1);
+   double slowMA=GetVal(slowMAHandle,1);
 
    bool uptrend = fastMA > slowMA;
    bool downtrend = fastMA < slowMA;
@@ -157,12 +227,14 @@ void CheckEntrySignal()
    {
       if(CountPositions(POSITION_TYPE_BUY)==0)
       {
-         double price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+         double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+         double tp=ask+(gridSpacing*TakeProfitSpacing);
 
-         trade.Buy(LotSize,_Symbol,price,0,price+(gridSpacing*TakeProfitSpacing));
-
-         lastBuyPrice=price;
-         buyGridActive=true;
+         if(OpenBuy(LotSize,tp))
+         {
+            lastBuyPrice=ask;
+            buyGridActive=true;
+         }
       }
    }
 
@@ -170,17 +242,19 @@ void CheckEntrySignal()
    {
       if(CountPositions(POSITION_TYPE_SELL)==0)
       {
-         double price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+         double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+         double tp=bid-(gridSpacing*TakeProfitSpacing);
 
-         trade.Sell(LotSize,_Symbol,price,0,price-(gridSpacing*TakeProfitSpacing));
-
-         lastSellPrice=price;
-         sellGridActive=true;
+         if(OpenSell(LotSize,tp))
+         {
+            lastSellPrice=bid;
+            sellGridActive=true;
+         }
       }
    }
 }
 
-//================ GRID LOGIC =================//
+//================ GRID MANAGEMENT =================//
 
 void ManageGrid()
 {
@@ -195,9 +269,10 @@ void ManageGrid()
       {
          if(lastBuyPrice - bid >= gridSpacing)
          {
-            trade.Buy(LotSize,_Symbol,ask,0,ask+(gridSpacing*TakeProfitSpacing));
+            double tp=ask+(gridSpacing*TakeProfitSpacing);
 
-            lastBuyPrice=ask;
+            if(OpenBuy(LotSize,tp))
+               lastBuyPrice=ask;
          }
       }
    }
@@ -210,9 +285,10 @@ void ManageGrid()
       {
          if(ask - lastSellPrice >= gridSpacing)
          {
-            trade.Sell(LotSize,_Symbol,bid,0,bid-(gridSpacing*TakeProfitSpacing));
+            double tp=bid-(gridSpacing*TakeProfitSpacing);
 
-            lastSellPrice=bid;
+            if(OpenSell(LotSize,tp))
+               lastSellPrice=bid;
          }
       }
    }
@@ -222,11 +298,11 @@ void ManageGrid()
 
 void CheckExitSignal()
 {
-   double fastPrev=GetBufferValue(exitFastHandle,2);
-   double fastCur=GetBufferValue(exitFastHandle,1);
+   double fastPrev=GetVal(exitFastHandle,2);
+   double fastCur=GetVal(exitFastHandle,1);
 
-   double slowPrev=GetBufferValue(exitSlowHandle,2);
-   double slowCur=GetBufferValue(exitSlowHandle,1);
+   double slowPrev=GetVal(exitSlowHandle,2);
+   double slowCur=GetVal(exitSlowHandle,1);
 
    bool crossUp = fastPrev < slowPrev && fastCur > slowCur;
    bool crossDown = fastPrev > slowPrev && fastCur < slowCur;
@@ -241,16 +317,14 @@ void ManageBasket()
 {
    double profit=BasketProfit();
 
-   double spacingValue = gridSpacing / _Point * SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
-
-   double target = BasketProfitSpacing * spacingValue;
-   double stop = -BasketStopSpacing * spacingValue;
+   double target = BasketProfitSpacing * GridSpacingPips;
+   double stop = -BasketStopSpacing * GridSpacingPips;
 
    if(profit >= target || profit <= stop)
       CloseAll();
 }
 
-//================ MAIN LOOP =================//
+//================ MAIN =================//
 
 void OnTick()
 {
