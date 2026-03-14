@@ -20,9 +20,10 @@ jobs:
       run: |
         Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
 
-    - name: Set MetaEditor
+    - name: Set MetaEditor and Terminal
       run: |
         echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
+        echo "TERMINAL=C:\Program Files\MetaTrader 5\terminal64.exe" >> $env:GITHUB_ENV
 
     - name: Download MQL5 Include Library
       run: |
@@ -31,6 +32,7 @@ jobs:
     - name: Prepare MQL5 folders
       run: |
         $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\MQL5"
+
         New-Item -ItemType Directory -Force -Path "$mql\Experts"
         New-Item -ItemType Directory -Force -Path "$mql\Include"
 
@@ -43,55 +45,91 @@ jobs:
       run: |
         & "$env:METAEDITOR" /compile:"$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5" /log:compile.log
 
-    - name: Show log
+    - name: Show compile log
       run: |
         Get-Content compile.log
 
-    - name: Backtesting Configuration Summary
+    - name: Create Strategy Tester configuration
+      shell: pwsh
+      run: |
+        $tester=@"
+[Common]
+TestExpert=EA_DANE_AUTO_BOT2
+Symbol=XAUUSD
+Period=M5
+Model=0
+Optimization=0
+FromDate=2022.01.01
+ToDate=2025.01.01
+Deposit=10000
+Currency=USD
+Leverage=100
+Report=backtest_report
+ReplaceReport=1
+ShutdownTerminal=1
+"@
+
+        $tester | Out-File tester.ini -Encoding ASCII
+        Get-Content tester.ini
+
+    - name: Run Strategy Tester
+      shell: pwsh
+      run: |
+        Start-Process "$env:TERMINAL" `
+        -ArgumentList "/portable","/config:tester.ini" `
+        -Wait
+
+    - name: Locate Backtest Report
+      shell: pwsh
+      run: |
+        $report = Get-ChildItem -Path $env:USERPROFILE -Recurse -Filter "backtest_report*.html" -ErrorAction SilentlyContinue | Select-Object -First 1
+
+        if($report){
+          echo "REPORT_PATH=$($report.FullName)" >> $env:GITHUB_ENV
+          Write-Host "Backtest report found at:"
+          Write-Host $report.FullName
+        }
+        else{
+          Write-Host "Backtest report not generated"
+        }
+
+    - name: Extract Backtest Metrics
       shell: pwsh
       run: |
 
         Write-Host ""
-        Write-Host "================ BACKTEST CONFIGURATION ================"
+        Write-Host "================ BACKTEST RESULTS ================"
 
-        Write-Host "Symbol: XAUUSD"
-        Write-Host "Timeframe: M5"
-        Write-Host "Model: Every Tick"
-        Write-Host "Testing Period: 2022.01.01 - 2025.01.01"
-        Write-Host "Initial Deposit: 10000 USD"
-        Write-Host "Leverage: 1:100"
+        if($env:REPORT_PATH){
 
-        Write-Host ""
-        Write-Host "================ EXPECTED BACKTEST OUTPUT ================"
+            $content = Get-Content $env:REPORT_PATH
 
-        Write-Host "Performance Metrics:"
-        Write-Host "- Total Net Profit"
-        Write-Host "- Gross Profit"
-        Write-Host "- Gross Loss"
-        Write-Host "- Profit Factor"
-        Write-Host "- Expected Payoff"
-        Write-Host "- Recovery Factor"
-        Write-Host "- Sharpe Ratio"
+            $metrics = @(
+              "Total Net Profit",
+              "Gross Profit",
+              "Gross Loss",
+              "Profit Factor",
+              "Expected Payoff",
+              "Recovery Factor",
+              "Sharpe Ratio",
+              "Total Trades",
+              "Short Trades",
+              "Long Trades",
+              "Balance Drawdown Maximal",
+              "Equity Drawdown Maximal"
+            )
 
-        Write-Host ""
-        Write-Host "Trade Statistics:"
-        Write-Host "- Total Trades"
-        Write-Host "- Long Trades"
-        Write-Host "- Short Trades"
-        Write-Host "- Winning Trades"
-        Write-Host "- Losing Trades"
+            foreach($m in $metrics){
+              $line = $content | Select-String $m | Select-Object -First 1
+              if($line){
+                Write-Host $line.Line
+              }
+            }
 
-        Write-Host ""
-        Write-Host "Risk Analysis:"
-        Write-Host "- Max Balance Drawdown"
-        Write-Host "- Max Equity Drawdown"
-        Write-Host "- Relative Drawdown"
-
-        Write-Host ""
-        Write-Host "Execution Information:"
-        Write-Host "- Spread Used"
-        Write-Host "- Tick Model"
-        Write-Host "- Modeling Quality"
+        }
+        else{
+            Write-Host "Backtest metrics unavailable"
+        }
 
     - name: Find EX5
       run: |
