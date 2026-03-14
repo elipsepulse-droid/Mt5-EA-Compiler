@@ -1,4 +1,4 @@
-name: MT5 EA Compile + Code Analysis + Backtest Log
+name: MT5 EA Compile + Analysis + Backtest Logs
 
 on:
   workflow_dispatch:
@@ -9,91 +9,96 @@ jobs:
 
     steps:
 
-    - name: Checkout Repository
-      uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-    - name: Download MetaTrader 5
-      shell: pwsh
-      run: |
-        Invoke-WebRequest https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe -OutFile mt5setup.exe
+      - name: Download MT5
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe -OutFile mt5setup.exe
 
-    - name: Install MetaTrader 5
-      shell: pwsh
-      run: |
-        Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
+      - name: Install MT5
+        shell: pwsh
+        run: |
+          Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
 
-    - name: Detect MT5 Data Folder
-      shell: pwsh
-      run: |
-        $terminal = Get-ChildItem "$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal" | Select-Object -First 1
-        $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\$($terminal.Name)\MQL5"
-        New-Item -ItemType Directory -Force "$mql\Experts"
-        Copy-Item *.mq5 "$mql\Experts\" -Force
+      - name: Prepare MT5 Data Folder
+        shell: pwsh
+        run: |
 
-        echo "MQLPATH=$mql" >> $env:GITHUB_ENV
-        echo "TERMINAL=C:\Program Files\MetaTrader 5\terminal64.exe" >> $env:GITHUB_ENV
-        echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
+          $terminalFolder = Get-ChildItem "$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal" | Select-Object -First 1
+          $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\$($terminalFolder.Name)\MQL5"
 
-    - name: Compile EA
-      shell: pwsh
-      run: |
-        $mq5 = Get-ChildItem "$env:MQLPATH\Experts\*.mq5" | Select-Object -First 1
-        & "$env:METAEDITOR" /compile:$mq5.FullName /log:compile.log
+          New-Item -ItemType Directory -Force "$mql\Experts"
 
-    - name: Print Compilation Log
-      shell: pwsh
-      run: |
-        Get-Content compile.log
+          Copy-Item *.mq5 "$mql\Experts\" -Force
 
-    - name: Static Code Analysis
-      shell: pwsh
-      run: |
+          echo "MQLPATH=$mql" >> $env:GITHUB_ENV
+          echo "TERMINAL=C:\Program Files\MetaTrader 5\terminal64.exe" >> $env:GITHUB_ENV
+          echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
 
-        $file = Get-ChildItem "$env:MQLPATH\Experts\*.mq5" | Select-Object -First 1
-        $code = Get-Content $file.FullName
+      - name: Compile EA
+        shell: pwsh
+        run: |
 
-        $lines = $code.Count
-        $functions = ($code | Select-String "void |int |double |bool ").Count
-        $includes = ($code | Select-String "#include").Count
-        $classes = ($code | Select-String "class ").Count
-        $structs = ($code | Select-String "struct ").Count
-        $enums = ($code | Select-String "enum ").Count
-        $inputs = ($code | Select-String "input ").Count
-        $globals = ($code | Select-String "extern ").Count
+          $mq5 = Get-ChildItem "$env:MQLPATH\Experts\*.mq5" | Select-Object -First 1
 
-        $ordersend = ($code | Select-String "OrderSend").Count
-        $buy = ($code | Select-String "ORDER_TYPE_BUY").Count
-        $sell = ($code | Select-String "ORDER_TYPE_SELL").Count
-        $pending = ($code | Select-String "LIMIT|STOP").Count
-        $close = ($code | Select-String "PositionClose").Count
+          & "$env:METAEDITOR" /compile:$mq5.FullName /log:compile.log
 
-        echo "================ BASIC ANALYSIS ================"
-        echo "Total Lines: $lines"
-        echo "Function Count: $functions"
-        echo "Include Files: $includes"
-        echo "Classes: $classes"
-        echo "Structures: $structs"
-        echo "Enumerations: $enums"
-        echo "Global Variables: $globals"
-        echo "Input Parameters: $inputs"
+      - name: Show Compile Log
+        shell: pwsh
+        run: |
+          Get-Content compile.log
 
-        echo ""
-        echo "================ TRADING DETECTION ================"
-        echo "OrderSend Calls: $ordersend"
-        echo "Buy Order Calls: $buy"
-        echo "Sell Order Calls: $sell"
-        echo "Pending Order Patterns: $pending"
-        echo "PositionClose Calls: $close"
+      - name: Static Code Analysis
+        shell: pwsh
+        run: |
 
-        if($ordersend -gt 5){
-          echo "Risk Flag: Grid or high frequency trading detected"
-        }
+          $file = Get-ChildItem "$env:MQLPATH\Experts\*.mq5" | Select-Object -First 1
+          $code = Get-Content $file.FullName
 
-    - name: Run Strategy Tester
-      shell: pwsh
-      run: |
+          $lineCount = $code.Count
+          $functionCount = ($code | Select-String -Pattern "OnInit|OnTick|OnTimer|OnDeinit").Count
+          $includeCount = ($code | Select-String -Pattern "#include").Count
+          $classCount = ($code | Select-String -Pattern "\bclass\b").Count
+          $structCount = ($code | Select-String -Pattern "\bstruct\b").Count
+          $enumCount = ($code | Select-String -Pattern "\benum\b").Count
+          $inputCount = ($code | Select-String -Pattern "\binput\b").Count
+          $globalCount = ($code | Select-String -Pattern "\bextern\b").Count
 
-        $config=@"
+          $orderSendCount = ($code | Select-String -Pattern "OrderSend").Count
+          $orderAsyncCount = ($code | Select-String -Pattern "OrderSendAsync").Count
+          $buyCount = ($code | Select-String -Pattern "BUY").Count
+          $sellCount = ($code | Select-String -Pattern "SELL").Count
+          $closeCount = ($code | Select-String -Pattern "PositionClose").Count
+
+          Write-Output "================ BASIC ANALYSIS ================"
+          Write-Output "Total Lines: $lineCount"
+          Write-Output "Function Count: $functionCount"
+          Write-Output "Include Files: $includeCount"
+          Write-Output "Classes: $classCount"
+          Write-Output "Structures: $structCount"
+          Write-Output "Enumerations: $enumCount"
+          Write-Output "Global Variables: $globalCount"
+          Write-Output "Input Parameters: $inputCount"
+
+          Write-Output ""
+          Write-Output "================ TRADING RISK ANALYSIS ================"
+          Write-Output "OrderSend Calls: $orderSendCount"
+          Write-Output "OrderSendAsync Calls: $orderAsyncCount"
+          Write-Output "Buy Order Calls: $buyCount"
+          Write-Output "Sell Order Calls: $sellCount"
+          Write-Output "PositionClose Calls: $closeCount"
+
+          if($orderSendCount -gt 5){
+            Write-Output "Risk Flag: Grid strategy detected"
+          }
+
+      - name: Create Tester Config
+        shell: pwsh
+        run: |
+
+          $config=@"
 [Tester]
 Expert=EA_DANE_AUTO_BOT2
 Symbol=XAUUSD
@@ -105,42 +110,48 @@ ToDate=2024.01.01
 Deposit=10000
 Currency=USD
 Leverage=100
-ExecutionMode=0
 ShutdownTerminal=1
 "@
 
-        $config | Out-File tester.ini -Encoding ASCII
+          $config | Out-File tester.ini -Encoding ASCII
 
-        & "$env:TERMINAL" /portable /config:tester.ini
+      - name: Run Strategy Tester
+        shell: pwsh
+        run: |
 
-        Start-Sleep 60
+          & "$env:TERMINAL" /portable /config:tester.ini
 
-    - name: Print Tester Logs
-      shell: pwsh
-      run: |
+          Start-Sleep 90
 
-        $logpath="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal"
+      - name: Show Backtest Logs
+        shell: pwsh
+        run: |
 
-        $testerLogs = Get-ChildItem $logpath -Recurse -Filter *.log | Sort-Object LastWriteTime -Descending | Select-Object -First 3
+          $logs = Get-ChildItem "$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal" -Recurse -Filter *.log |
+                  Sort-Object LastWriteTime -Descending |
+                  Select-Object -First 5
 
-        echo ""
-        echo "================ BACKTEST LOG OUTPUT ================"
+          Write-Output ""
+          Write-Output "================ BACKTEST LOGS ================"
 
-        foreach($log in $testerLogs){
-          echo ""
-          echo "Log File: $($log.FullName)"
-          Get-Content $log.FullName -Tail 50
-        }
+          foreach($log in $logs){
+            Write-Output ""
+            Write-Output "Log File: $($log.FullName)"
+            Get-Content $log.FullName -Tail 40
+          }
 
-    - name: Locate EX5
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Force compiled
-        $ex5 = Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
-        Copy-Item $ex5.FullName compiled\
+      - name: Save EX5
+        shell: pwsh
+        run: |
 
-    - name: Upload Compiled EA
-      uses: actions/upload-artifact@v4
-      with:
-        name: compiled-ex5
-        path: compiled
+          New-Item -ItemType Directory -Force compiled
+
+          $ex5 = Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
+
+          Copy-Item $ex5.FullName compiled\
+
+      - name: Upload EX5
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-ex5
+          path: compiled
