@@ -1,10 +1,10 @@
-name: MT5 EA Compile + Backtest
+name: MT5 EA Compile + Analysis + Backtest
 
 on:
   workflow_dispatch:
 
 jobs:
-  mt5-build:
+  build-test:
     runs-on: windows-latest
 
     steps:
@@ -13,93 +13,92 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Download MetaTrader 5
-      shell: powershell
+      shell: pwsh
       run: |
         Invoke-WebRequest https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe -OutFile mt5setup.exe
 
     - name: Install MetaTrader 5
-      shell: powershell
+      shell: pwsh
       run: |
         Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
 
-    - name: Detect MT5 data directory
-      shell: powershell
+    - name: Configure environment
+      shell: pwsh
       run: |
-        $terminalRoot="$env:APPDATA\MetaQuotes\Terminal"
-        $terminalDir=Get-ChildItem $terminalRoot | Select-Object -First 1
-        $dataPath="$terminalRoot\$($terminalDir.Name)\MQL5\Experts"
+        echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
+        echo "TERMINAL=C:\Program Files\MetaTrader 5\terminal64.exe" >> $env:GITHUB_ENV
 
-        New-Item -ItemType Directory -Force -Path $dataPath
+        $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\MQL5"
 
-        Copy-Item EA_DANE_AUTO_BOT2.mq5 $dataPath\EA_DANE_AUTO_BOT2.mq5
+        New-Item -ItemType Directory -Force -Path "$mql\Experts"
 
-        echo "EA_FILE=$dataPath\EA_DANE_AUTO_BOT2.mq5" >> $env:GITHUB_ENV
-        echo "DATA_PATH=$dataPath" >> $env:GITHUB_ENV
+        Copy-Item EA_DANE_AUTO_BOT2.mq5 "$mql\Experts\EA_DANE_AUTO_BOT2.mq5"
+
+        echo "MQLPATH=$mql" >> $env:GITHUB_ENV
+
+    - name: Prepare result folders
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force results
+        New-Item -ItemType Directory -Force compiled
+
+    - name: Create Strategy Tester configuration
+      shell: pwsh
+      run: |
+        $reportPath="${{ github.workspace }}\results\backtest_report"
+
+        @"
+        [Common]
+        Login=0
+        Password=
+        Server=
+
+        [Tester]
+        TestExpert=EA_DANE_AUTO_BOT2
+        Symbol=XAUUSD
+        Period=M5
+        Model=0
+        Optimization=0
+        FromDate=2022.01.01
+        ToDate=2025.01.01
+        Deposit=10000
+        Currency=USD
+        Leverage=100
+        ExecutionMode=0
+        ReplaceReport=1
+        Report=$reportPath
+        ShutdownTerminal=1
+        "@ | Out-File tester.ini -Encoding ASCII
 
     - name: Compile EA
-      shell: powershell
+      shell: pwsh
       run: |
-        $metaEditor="C:\Program Files\MetaTrader 5\metaeditor64.exe"
-        & $metaEditor /compile:"$env:EA_FILE" /log:compile.log
+        & "$env:METAEDITOR" /compile:"$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5" /log:compile.log
 
-    - name: Show compilation log
-      shell: powershell
+    - name: Show compile log
+      shell: pwsh
       run: |
         Get-Content compile.log
 
-    - name: Locate EX5
-      shell: powershell
-      run: |
-        $file=Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Recurse -Filter *.ex5 | Select-Object -First 1
-
-        if($file){
-          New-Item -ItemType Directory -Force -Path compiled
-          Copy-Item $file.FullName compiled\
-        } else {
-          Write-Error "EX5 file not generated"
-          exit 1
-        }
-
-    - name: Create Strategy Tester configuration
-      shell: powershell
-      run: |
-        @"
-[Common]
-Login=0
-Password=
-Server=
-
-[Tester]
-Expert=EA_DANE_AUTO_BOT2
-Symbol=XAUUSD
-Period=M5
-Model=0
-FromDate=2022.01.01
-ToDate=2025.01.01
-Deposit=10000
-Currency=USD
-Leverage=100
-ExecutionMode=0
-Optimization=0
-Report=github_backtest
-ReplaceReport=1
-ShutdownTerminal=1
-"@ | Out-File tester.ini -Encoding ASCII
-
     - name: Run Strategy Tester
-      shell: powershell
+      shell: pwsh
       run: |
-        $terminal="C:\Program Files\MetaTrader 5\terminal64.exe"
-        & $terminal /portable /config:tester.ini
+        & "$env:TERMINAL" /portable /config:tester.ini
         Start-Sleep -Seconds 20
 
-    - name: Collect backtest results
-      shell: powershell
+    - name: Verify backtest results
+      shell: pwsh
       run: |
-        New-Item -ItemType Directory -Force -Path results
+        Get-ChildItem results
 
-        Get-ChildItem "$env:USERPROFILE" -Recurse -Include github_backtest*.html,github_backtest*.xml,github_backtest*.csv -ErrorAction SilentlyContinue |
-        Copy-Item -Destination results -Force
+    - name: Locate EX5
+      shell: pwsh
+      run: |
+        $file = Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
+
+        if($file){
+          Copy-Item $file.FullName compiled\
+        }
 
     - name: Upload compiled EA
       uses: actions/upload-artifact@v4
@@ -107,9 +106,8 @@ ShutdownTerminal=1
         name: compiled-ex5
         path: compiled
 
-    - name: Upload backtest results
+    - name: Upload Backtest Results
       uses: actions/upload-artifact@v4
       with:
         name: backtest-results
         path: results
-        if-no-files-found: ignore
