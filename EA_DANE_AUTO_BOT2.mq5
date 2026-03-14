@@ -1,5 +1,6 @@
 //+------------------------------------------------------------------+
-//| Grid RSI EMA EA (MT5)                                           |
+//| Improved Grid RSI EMA EA (MT5)                                  |
+//| Balanced TP / SL and corrected profit logic                     |
 //| Cloud compile compatible                                        |
 //+------------------------------------------------------------------+
 #property strict
@@ -8,8 +9,9 @@ input double LotSize=0.01;
 input int GridSize=10;
 input int GridSpacingPips=500;
 
-input double TP_Multiplier=1.0;
-input double MaxProfitMulti=5.0;
+input double TP_Multiplier=2.0;     // Larger TP
+input double SL_Multiplier=1.0;     // Smaller SL
+input double MaxProfitMoney=2.0;    // Close grid when profit reached
 
 input int RSI_Period=14;
 input double RSI_BuyLevel=40;
@@ -98,18 +100,26 @@ void OpenTrade(bool buy)
 
    double price;
    double tp;
+   double sl;
+
    double spacing=GridSpacingPips*Pip();
 
    if(buy)
    {
       price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+
       tp=price+(spacing*TP_Multiplier);
+      sl=price-(spacing*SL_Multiplier);
+
       req.type=ORDER_TYPE_BUY;
    }
    else
    {
       price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+
       tp=price-(spacing*TP_Multiplier);
+      sl=price+(spacing*SL_Multiplier);
+
       req.type=ORDER_TYPE_SELL;
    }
 
@@ -118,6 +128,7 @@ void OpenTrade(bool buy)
    req.volume=LotSize;
    req.price=price;
    req.tp=tp;
+   req.sl=sl;
    req.magic=55555;
    req.deviation=20;
    req.type_filling=ORDER_FILLING_IOC;
@@ -238,17 +249,7 @@ void CloseAll()
                req.type=ORDER_TYPE_BUY;
             }
 
-            bool sent=OrderSend(req,res);
-
-            if(!sent)
-            {
-               Print("Close failed. Retcode: ",res.retcode);
-            }
-            else
-            {
-               if(res.retcode!=10009 && res.retcode!=10008)
-                  Print("Close server retcode: ",res.retcode);
-            }
+            OrderSend(req,res);
          }
       }
    }
@@ -276,8 +277,6 @@ double GridProfit()
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   double spacing=GridSpacingPips*Pip();
-
    if(!GridActive)
    {
       int signal=CheckSignal();
@@ -309,7 +308,7 @@ void OnTick()
          return;
       }
 
-      if(GridProfit()>=spacing*MaxProfitMulti)
+      if(GridProfit()>=MaxProfitMoney)
       {
          CloseAll();
          return;
