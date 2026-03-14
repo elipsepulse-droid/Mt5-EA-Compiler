@@ -1,10 +1,10 @@
-name: Compile MT5 EA
+name: MT5 EA Compile + Analysis + Backtest
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-test:
     runs-on: windows-latest
 
     steps:
@@ -13,44 +13,74 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Download MetaTrader 5
+      shell: pwsh
       run: |
         Invoke-WebRequest https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe -OutFile mt5setup.exe
 
-    - name: Install MT5
+    - name: Install MetaTrader 5
+      shell: pwsh
       run: |
         Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
 
-    - name: Set MetaEditor
+    - name: Set MetaEditor path
+      shell: pwsh
       run: |
         echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
+        echo "TERMINAL=C:\Program Files\MetaTrader 5\terminal64.exe" >> $env:GITHUB_ENV
 
-    - name: Download MQL5 Include Library
-      run: |
-        git clone https://github.com/EA31337/EA31337-classes.git mql_lib
-
-    - name: Prepare MQL5 folders
+    - name: Prepare MT5 directories
+      shell: pwsh
       run: |
         $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\MQL5"
 
         New-Item -ItemType Directory -Force -Path "$mql\Experts"
         New-Item -ItemType Directory -Force -Path "$mql\Include"
+        New-Item -ItemType Directory -Force -Path "$mql\Files"
 
         Copy-Item EA_DANE_AUTO_BOT2.mq5 "$mql\Experts\EA_DANE_AUTO_BOT2.mq5"
-        Copy-Item -Recurse mql_lib\* "$mql\Include"
 
         echo "MQLPATH=$mql" >> $env:GITHUB_ENV
 
+    - name: Create Strategy Tester configuration
+      shell: pwsh
+      run: |
+        @"
+        [Common]
+        Login=0
+        Password=
+        Server=
+
+        [Tester]
+        TestExpert=EA_DANE_AUTO_BOT2
+        Symbol=XAUUSD
+        Period=M5
+        Model=0
+        Optimization=1
+        FromDate=2022.01.01
+        ToDate=2025.01.01
+        Deposit=10000
+        Currency=USD
+        Leverage=100
+        ExecutionMode=0
+        ReplaceReport=1
+        Report=backtest_report
+        ShutdownTerminal=1
+        "@ | Out-File tester.ini -Encoding ASCII
+
     - name: Compile EA
+      shell: pwsh
       run: |
         & "$env:METAEDITOR" /compile:"$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5" /log:compile.log
 
-    - name: Show Raw Compile Log
+    - name: Show compile log
+      shell: pwsh
       run: |
         Get-Content compile.log
 
-    - name: Advanced Static Analysis
+    - name: Static Code Analysis
       shell: pwsh
       run: |
+
         $file="$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5"
         $content=Get-Content $file
         $text=$content -join "`n"
@@ -109,21 +139,11 @@ jobs:
 
         Write-Host ""
         Write-Host "================ ERROR INFORMATION ================"
-        foreach($e in $errorLines){
-          Write-Host $e.Line
-        }
+        foreach($e in $errorLines){ Write-Host $e.Line }
 
         Write-Host ""
         Write-Host "================ WARNING INFORMATION ================"
-        foreach($w in $warningLines){
-          Write-Host $w.Line
-        }
-
-        Write-Host ""
-        Write-Host "================ INFORMATION / NOTES ================"
-        $log | Select-String "include"
-        $log | Select-String "resource"
-        $log | Select-String "library"
+        foreach($w in $warningLines){ Write-Host $w.Line }
 
         Write-Host ""
         Write-Host "================ TRADING RELATED DETECTION ================"
@@ -156,7 +176,20 @@ jobs:
           Write-Host "Successful compilation message: Compilation finished without critical errors"
         }
 
-    - name: Find EX5
+    - name: Run Strategy Tester
+      shell: pwsh
+      run: |
+        & "$env:TERMINAL" /portable /config:tester.ini
+
+    - name: Collect Backtest Results
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force results
+
+        Copy-Item "$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\Files\backtest_report.*" results\ -ErrorAction SilentlyContinue
+
+    - name: Locate EX5
+      shell: pwsh
       run: |
         $file=Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
 
@@ -170,8 +203,14 @@ jobs:
           exit 1
         }
 
-    - name: Upload EX5
+    - name: Upload compiled EA
       uses: actions/upload-artifact@v4
       with:
-        name: compiled-ea
+        name: compiled-ex5
         path: compiled
+
+    - name: Upload Backtest Results
+      uses: actions/upload-artifact@v4
+      with:
+        name: backtest-results
+        path: results
