@@ -1,7 +1,6 @@
 //+------------------------------------------------------------------+
 //| Improved Grid RSI EMA EA (MT5)                                  |
-//| Balanced TP / SL and corrected profit logic                     |
-//| Cloud compile compatible                                        |
+//| Warning-free version                                            |
 //+------------------------------------------------------------------+
 #property strict
 
@@ -9,9 +8,9 @@ input double LotSize=0.01;
 input int GridSize=10;
 input int GridSpacingPips=500;
 
-input double TP_Multiplier=2.0;     // Larger TP
-input double SL_Multiplier=1.0;     // Smaller SL
-input double MaxProfitMoney=2.0;    // Close grid when profit reached
+input double TP_Multiplier=2.0;
+input double SL_Multiplier=1.0;
+input double MaxProfitMoney=2.0;
 
 input int RSI_Period=14;
 input double RSI_BuyLevel=40;
@@ -107,19 +106,15 @@ void OpenTrade(bool buy)
    if(buy)
    {
       price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-
       tp=price+(spacing*TP_Multiplier);
       sl=price-(spacing*SL_Multiplier);
-
       req.type=ORDER_TYPE_BUY;
    }
    else
    {
       price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-
       tp=price-(spacing*TP_Multiplier);
       sl=price+(spacing*SL_Multiplier);
-
       req.type=ORDER_TYPE_SELL;
    }
 
@@ -135,15 +130,8 @@ void OpenTrade(bool buy)
 
    bool sent=OrderSend(req,res);
 
-   if(!sent)
-   {
+   if(!sent || (res.retcode!=10009 && res.retcode!=10008))
       Print("OrderSend failed. Retcode: ",res.retcode);
-   }
-   else
-   {
-      if(res.retcode!=10009 && res.retcode!=10008)
-         Print("Trade server retcode: ",res.retcode);
-   }
 }
 //+------------------------------------------------------------------+
 int CheckSignal()
@@ -187,11 +175,8 @@ bool ExitSignal()
    CopyBuffer(emaExitFast,0,0,2,f);
    CopyBuffer(emaExitSlow,0,0,2,s);
 
-   if(f[1]<s[1] && f[0]>s[0])
-      return true;
-
-   if(f[1]>s[1] && f[0]<s[0])
-      return true;
+   if(f[1]<s[1] && f[0]>s[0]) return true;
+   if(f[1]>s[1] && f[0]<s[0]) return true;
 
    return false;
 }
@@ -249,7 +234,10 @@ void CloseAll()
                req.type=ORDER_TYPE_BUY;
             }
 
-            OrderSend(req,res);
+            bool sent=OrderSend(req,res);
+
+            if(!sent || (res.retcode!=10009 && res.retcode!=10008))
+               Print("Close failed. Retcode: ",res.retcode);
          }
       }
    }
