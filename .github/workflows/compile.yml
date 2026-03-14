@@ -20,10 +20,9 @@ jobs:
       run: |
         Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
 
-    - name: Set MetaEditor and Terminal
+    - name: Set MetaEditor
       run: |
         echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
-        echo "TERMINAL=C:\Program Files\MetaTrader 5\terminal64.exe" >> $env:GITHUB_ENV
 
     - name: Download MQL5 Include Library
       run: |
@@ -32,7 +31,6 @@ jobs:
     - name: Prepare MQL5 folders
       run: |
         $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\MQL5"
-
         New-Item -ItemType Directory -Force -Path "$mql\Experts"
         New-Item -ItemType Directory -Force -Path "$mql\Include"
 
@@ -49,60 +47,21 @@ jobs:
       run: |
         Get-Content compile.log
 
-    - name: Create Strategy Tester configuration
-      shell: pwsh
-      run: |
-        $tester=@"
-[Common]
-TestExpert=EA_DANE_AUTO_BOT2
-Symbol=XAUUSD
-Period=M5
-Model=0
-Optimization=0
-FromDate=2022.01.01
-ToDate=2025.01.01
-Deposit=10000
-Currency=USD
-Leverage=100
-Report=backtest_report
-ReplaceReport=1
-ShutdownTerminal=1
-"@
-
-        $tester | Out-File tester.ini -Encoding ASCII
-        Get-Content tester.ini
-
-    - name: Run Strategy Tester
-      shell: pwsh
-      run: |
-        Start-Process "$env:TERMINAL" `
-        -ArgumentList "/portable","/config:tester.ini" `
-        -Wait
-
-    - name: Locate Backtest Report
-      shell: pwsh
-      run: |
-        $report = Get-ChildItem -Path $env:USERPROFILE -Recurse -Filter "backtest_report*.html" -ErrorAction SilentlyContinue | Select-Object -First 1
-
-        if($report){
-          echo "REPORT_PATH=$($report.FullName)" >> $env:GITHUB_ENV
-          Write-Host "Backtest report found at:"
-          Write-Host $report.FullName
-        }
-        else{
-          Write-Host "Backtest report not generated"
-        }
-
-    - name: Extract Backtest Metrics
+    - name: Backtest Report Scanner
       shell: pwsh
       run: |
 
         Write-Host ""
-        Write-Host "================ BACKTEST RESULTS ================"
+        Write-Host "================ BACKTEST RESULT SCAN ================"
 
-        if($env:REPORT_PATH){
+        $report = Get-ChildItem -Recurse -Filter "*.html" -ErrorAction SilentlyContinue | Select-Object -First 1
 
-            $content = Get-Content $env:REPORT_PATH
+        if($report){
+
+            Write-Host "Backtest report detected:"
+            Write-Host $report.FullName
+
+            $content = Get-Content $report.FullName
 
             $metrics = @(
               "Total Net Profit",
@@ -113,22 +72,20 @@ ShutdownTerminal=1
               "Recovery Factor",
               "Sharpe Ratio",
               "Total Trades",
-              "Short Trades",
               "Long Trades",
-              "Balance Drawdown Maximal",
-              "Equity Drawdown Maximal"
+              "Short Trades",
+              "Balance Drawdown",
+              "Equity Drawdown"
             )
 
             foreach($m in $metrics){
-              $line = $content | Select-String $m | Select-Object -First 1
-              if($line){
-                Write-Host $line.Line
-              }
+                $line = $content | Select-String $m | Select -First 1
+                if($line){ Write-Host $line.Line }
             }
 
         }
         else{
-            Write-Host "Backtest metrics unavailable"
+            Write-Host "No backtest report found in runner environment"
         }
 
     - name: Find EX5
