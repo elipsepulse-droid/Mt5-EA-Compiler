@@ -1,3 +1,7 @@
+//+------------------------------------------------------------------+
+//| Grid RSI EMA EA (MT5)                                           |
+//| Cloud compile compatible                                        |
+//+------------------------------------------------------------------+
 #property strict
 
 input double LotSize=0.01;
@@ -31,12 +35,14 @@ int emaTrendSlow;
 int emaExitFast;
 int emaExitSlow;
 
+//+------------------------------------------------------------------+
 double Pip()
 {
-   if(_Digits==3 || _Digits==5) return _Point*10;
+   if(_Digits==3 || _Digits==5)
+      return _Point*10.0;
    return _Point;
 }
-
+//+------------------------------------------------------------------+
 int OnInit()
 {
    rsiHandle=iRSI(_Symbol,_Period,RSI_Period,PRICE_CLOSE);
@@ -49,7 +55,7 @@ int OnInit()
 
    return(INIT_SUCCEEDED);
 }
-
+//+------------------------------------------------------------------+
 void BuildGrid()
 {
    double spacing=GridSpacingPips*Pip();
@@ -60,7 +66,7 @@ void BuildGrid()
       GridSell[i]=StartPrice+(spacing*(i+1));
    }
 }
-
+//+------------------------------------------------------------------+
 bool LevelUsed(double price)
 {
    for(int i=0;i<PositionsTotal();i++)
@@ -81,7 +87,7 @@ bool LevelUsed(double price)
 
    return false;
 }
-
+//+------------------------------------------------------------------+
 void OpenTrade(bool buy)
 {
    MqlTradeRequest req;
@@ -116,10 +122,19 @@ void OpenTrade(bool buy)
    req.deviation=20;
    req.type_filling=ORDER_FILLING_IOC;
 
-   if(!OrderSend(req,res))
-      Print("OrderSend failed: ",res.retcode);
-}
+   bool sent=OrderSend(req,res);
 
+   if(!sent)
+   {
+      Print("OrderSend failed. Retcode: ",res.retcode);
+   }
+   else
+   {
+      if(res.retcode!=10009 && res.retcode!=10008)
+         Print("Trade server retcode: ",res.retcode);
+   }
+}
+//+------------------------------------------------------------------+
 int CheckSignal()
 {
    double rsi[2];
@@ -133,25 +148,27 @@ int CheckSignal()
 
    return 0;
 }
-
+//+------------------------------------------------------------------+
 bool TrendBuy()
 {
    double f[1],s[1];
+
    CopyBuffer(emaTrendFast,0,0,1,f);
    CopyBuffer(emaTrendSlow,0,0,1,s);
 
    return f[0]>s[0];
 }
-
+//+------------------------------------------------------------------+
 bool TrendSell()
 {
    double f[1],s[1];
+
    CopyBuffer(emaTrendFast,0,0,1,f);
    CopyBuffer(emaTrendSlow,0,0,1,s);
 
    return f[0]<s[0];
 }
-
+//+------------------------------------------------------------------+
 bool ExitSignal()
 {
    double f[2],s[2];
@@ -159,12 +176,15 @@ bool ExitSignal()
    CopyBuffer(emaExitFast,0,0,2,f);
    CopyBuffer(emaExitSlow,0,0,2,s);
 
-   if(f[1]<s[1] && f[0]>s[0]) return true;
-   if(f[1]>s[1] && f[0]<s[0]) return true;
+   if(f[1]<s[1] && f[0]>s[0])
+      return true;
+
+   if(f[1]>s[1] && f[0]<s[0])
+      return true;
 
    return false;
 }
-
+//+------------------------------------------------------------------+
 void ManageGrid()
 {
    double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
@@ -184,7 +204,7 @@ void ManageGrid()
       }
    }
 }
-
+//+------------------------------------------------------------------+
 void CloseAll()
 {
    for(int i=PositionsTotal()-1;i>=0;i--)
@@ -218,14 +238,24 @@ void CloseAll()
                req.type=ORDER_TYPE_BUY;
             }
 
-            OrderSend(req,res);
+            bool sent=OrderSend(req,res);
+
+            if(!sent)
+            {
+               Print("Close failed. Retcode: ",res.retcode);
+            }
+            else
+            {
+               if(res.retcode!=10009 && res.retcode!=10008)
+                  Print("Close server retcode: ",res.retcode);
+            }
          }
       }
    }
 
    GridActive=false;
 }
-
+//+------------------------------------------------------------------+
 double GridProfit()
 {
    double profit=0;
@@ -243,7 +273,7 @@ double GridProfit()
 
    return profit;
 }
-
+//+------------------------------------------------------------------+
 void OnTick()
 {
    double spacing=GridSpacingPips*Pip();
@@ -286,3 +316,4 @@ void OnTick()
       }
    }
 }
+//+------------------------------------------------------------------+
