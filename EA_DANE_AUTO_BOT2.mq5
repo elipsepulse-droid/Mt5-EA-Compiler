@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
-//| Grid RSI EMA EA (MT5) - Cloud Compile Safe                      |
-//| Uses native OrderSend (no Trade.mqh dependency)                 |
+//| EA_DANE_AUTO_BOT2 - Grid RSI EMA EA (Cloud Compile Safe)        |
+//| No Trade.mqh dependency / OrderSend validation included         |
 //+------------------------------------------------------------------+
 #property strict
 
@@ -62,13 +62,14 @@ int OnInit()
    return(INIT_SUCCEEDED);
 }
 
-//================ BUFFER VALUE =================//
+//================ BUFFER READ =================//
 
 double GetVal(int handle,int shift)
 {
    double val[];
+
    if(CopyBuffer(handle,0,shift,1,val)<=0)
-      return(0);
+      return 0;
 
    return val[0];
 }
@@ -81,13 +82,13 @@ int CountPositions(int type)
 
    for(int i=0;i<PositionsTotal();i++)
    {
-      if(PositionGetTicket(i))
+      ulong ticket=PositionGetTicket(i);
+
+      if(PositionSelectByTicket(ticket))
       {
          if(PositionGetString(POSITION_SYMBOL)==_Symbol &&
             PositionGetInteger(POSITION_TYPE)==type)
-         {
             total++;
-         }
       }
    }
 
@@ -102,7 +103,9 @@ double BasketProfit()
 
    for(int i=0;i<PositionsTotal();i++)
    {
-      if(PositionGetTicket(i))
+      ulong ticket=PositionGetTicket(i);
+
+      if(PositionSelectByTicket(ticket))
       {
          if(PositionGetString(POSITION_SYMBOL)==_Symbol)
             profit+=PositionGetDouble(POSITION_PROFIT);
@@ -112,7 +115,7 @@ double BasketProfit()
    return profit;
 }
 
-//================ ORDER FUNCTIONS =================//
+//================ BUY ORDER =================//
 
 bool OpenBuy(double volume,double tp)
 {
@@ -129,9 +132,20 @@ bool OpenBuy(double volume,double tp)
    req.price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    req.tp=tp;
    req.deviation=20;
+   req.magic=20260314;
 
-   return OrderSend(req,res);
+   bool sent=OrderSend(req,res);
+
+   if(!sent || res.retcode!=10009)
+   {
+      Print("BUY failed retcode: ",res.retcode);
+      return false;
+   }
+
+   return true;
 }
+
+//================ SELL ORDER =================//
 
 bool OpenSell(double volume,double tp)
 {
@@ -148,8 +162,17 @@ bool OpenSell(double volume,double tp)
    req.price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
    req.tp=tp;
    req.deviation=20;
+   req.magic=20260314;
 
-   return OrderSend(req,res);
+   bool sent=OrderSend(req,res);
+
+   if(!sent || res.retcode!=10009)
+   {
+      Print("SELL failed retcode: ",res.retcode);
+      return false;
+   }
+
+   return true;
 }
 
 //================ CLOSE POSITION =================//
@@ -184,7 +207,10 @@ void ClosePosition(ulong ticket)
       req.price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    }
 
-   OrderSend(req,res);
+   bool sent=OrderSend(req,res);
+
+   if(!sent || res.retcode!=10009)
+      Print("Close failed retcode: ",res.retcode);
 }
 
 //================ CLOSE ALL =================//
@@ -195,8 +221,11 @@ void CloseAll()
    {
       ulong ticket=PositionGetTicket(i);
 
-      if(PositionGetString(POSITION_SYMBOL)==_Symbol)
-         ClosePosition(ticket);
+      if(PositionSelectByTicket(ticket))
+      {
+         if(PositionGetString(POSITION_SYMBOL)==_Symbol)
+            ClosePosition(ticket);
+      }
    }
 
    buyGridActive=false;
