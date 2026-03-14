@@ -1,10 +1,10 @@
-name: MT5 EA Compile + Analysis + Backtest
+name: MT5 EA Compile + Backtest
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-test:
+  mt5-build:
     runs-on: windows-latest
 
     steps:
@@ -13,40 +13,56 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Download MetaTrader 5
-      shell: pwsh
+      shell: powershell
       run: |
         Invoke-WebRequest https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe -OutFile mt5setup.exe
 
     - name: Install MetaTrader 5
-      shell: pwsh
+      shell: powershell
       run: |
         Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
 
-    - name: Set MT5 paths
-      shell: pwsh
+    - name: Detect MT5 data directory
+      shell: powershell
       run: |
-        echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
-        echo "TERMINAL=C:\Program Files\MetaTrader 5\terminal64.exe" >> $env:GITHUB_ENV
+        $terminalRoot="$env:APPDATA\MetaQuotes\Terminal"
+        $terminalDir=Get-ChildItem $terminalRoot | Select-Object -First 1
+        $dataPath="$terminalRoot\$($terminalDir.Name)\MQL5\Experts"
 
-    - name: Prepare MT5 folders
-      shell: pwsh
+        New-Item -ItemType Directory -Force -Path $dataPath
+
+        Copy-Item EA_DANE_AUTO_BOT2.mq5 $dataPath\EA_DANE_AUTO_BOT2.mq5
+
+        echo "EA_FILE=$dataPath\EA_DANE_AUTO_BOT2.mq5" >> $env:GITHUB_ENV
+        echo "DATA_PATH=$dataPath" >> $env:GITHUB_ENV
+
+    - name: Compile EA
+      shell: powershell
       run: |
+        $metaEditor="C:\Program Files\MetaTrader 5\metaeditor64.exe"
+        & $metaEditor /compile:"$env:EA_FILE" /log:compile.log
 
-        $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\MQL5"
-
-        New-Item -ItemType Directory -Force -Path "$mql\Experts"
-        New-Item -ItemType Directory -Force -Path "$mql\Files"
-
-        Copy-Item EA_DANE_AUTO_BOT2.mq5 "$mql\Experts\EA_DANE_AUTO_BOT2.mq5"
-
-        echo "MQLPATH=$mql" >> $env:GITHUB_ENV
-
-    - name: Create Strategy Tester config
-      shell: pwsh
+    - name: Show compilation log
+      shell: powershell
       run: |
+        Get-Content compile.log
 
-        $reportPath="$env:USERPROFILE\backtest_report"
+    - name: Locate EX5
+      shell: powershell
+      run: |
+        $file=Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Recurse -Filter *.ex5 | Select-Object -First 1
 
+        if($file){
+          New-Item -ItemType Directory -Force -Path compiled
+          Copy-Item $file.FullName compiled\
+        } else {
+          Write-Error "EX5 file not generated"
+          exit 1
+        }
+
+    - name: Create Strategy Tester configuration
+      shell: powershell
+      run: |
         @"
 [Common]
 Login=0
@@ -54,133 +70,36 @@ Password=
 Server=
 
 [Tester]
-TestExpert=EA_DANE_AUTO_BOT2
+Expert=EA_DANE_AUTO_BOT2
 Symbol=XAUUSD
 Period=M5
 Model=0
-Optimization=0
 FromDate=2022.01.01
 ToDate=2025.01.01
 Deposit=10000
 Currency=USD
 Leverage=100
 ExecutionMode=0
+Optimization=0
+Report=github_backtest
 ReplaceReport=1
-Report=$reportPath
 ShutdownTerminal=1
 "@ | Out-File tester.ini -Encoding ASCII
 
-    - name: Compile EA
-      shell: pwsh
-      run: |
-        & "$env:METAEDITOR" /compile:"$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5" /log:compile.log
-
-    - name: Show compile log
-      shell: pwsh
-      run: |
-        Get-Content compile.log
-
-    - name: Static Code Analysis
-      shell: pwsh
-      run: |
-
-        $file="$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5"
-        $content=Get-Content $file
-        $text=$content -join "`n"
-
-        $lines=$content.Count
-        $functions=[regex]::Matches($text,"(void|int|double|bool|string|datetime)\s+[A-Za-z0-9_]+\s*\(").Count
-        $classes=[regex]::Matches($text,"\bclass\s+[A-Za-z0-9_]+").Count
-        $structs=[regex]::Matches($text,"\bstruct\s+[A-Za-z0-9_]+").Count
-        $enums=[regex]::Matches($text,"\benum\s+[A-Za-z0-9_]+").Count
-        $globals=[regex]::Matches($text,"^(int|double|bool|string|datetime)\s+[A-Za-z0-9_]+\s*=").Count
-        $inputs=[regex]::Matches($text,"\binput\s+").Count
-        $includes=[regex]::Matches($text,"#include").Count
-
-        $orderSend=[regex]::Matches($text,"OrderSend\s*\(").Count
-        $buy=[regex]::Matches($text,"ORDER_TYPE_BUY|trade\.Buy").Count
-        $sell=[regex]::Matches($text,"ORDER_TYPE_SELL|trade\.Sell").Count
-        $close=[regex]::Matches($text,"PositionClose").Count
-
-        $oninit=[regex]::Matches($text,"OnInit").Count
-        $ontick=[regex]::Matches($text,"OnTick").Count
-
-        $log=Get-Content compile.log
-        $errorLines=$log | Select-String -Pattern "error"
-        $warningLines=$log | Select-String -Pattern "warning"
-
-        $errorCount=$errorLines.Count
-        $warningCount=$warningLines.Count
-
-        Write-Host ""
-        Write-Host "================ CODE STRUCTURE METRICS ================"
-        Write-Host "Total lines of code: $lines"
-        Write-Host "Number of functions: $functions"
-        Write-Host "Number of classes: $classes"
-        Write-Host "Number of structures: $structs"
-        Write-Host "Number of enumerations: $enums"
-        Write-Host "Number of global variables: $globals"
-        Write-Host "Number of input parameters: $inputs"
-        Write-Host "Number of include files: $includes"
-
-        Write-Host ""
-        Write-Host "================ ERROR INFORMATION ================"
-        foreach($e in $errorLines){ Write-Host $e.Line }
-
-        Write-Host ""
-        Write-Host "================ WARNING INFORMATION ================"
-        foreach($w in $warningLines){ Write-Host $w.Line }
-
-        Write-Host ""
-        Write-Host "================ TRADING RELATED DETECTION ================"
-        Write-Host "OrderSend usage: $orderSend"
-        Write-Host "Buy order functions: $buy"
-        Write-Host "Sell order functions: $sell"
-        Write-Host "PositionClose calls: $close"
-
-        Write-Host ""
-        Write-Host "================ EVENT FUNCTIONS ================"
-        Write-Host "OnInit events: $oninit"
-        Write-Host "OnTick events: $ontick"
-
-        Write-Host ""
-        Write-Host "================ FINAL COMPILATION SUMMARY ================"
-        Write-Host "Total errors: $errorCount"
-        Write-Host "Total warnings: $warningCount"
-
     - name: Run Strategy Tester
-      shell: pwsh
+      shell: powershell
       run: |
-        & "$env:TERMINAL" /portable /config:tester.ini
+        $terminal="C:\Program Files\MetaTrader 5\terminal64.exe"
+        & $terminal /portable /config:tester.ini
         Start-Sleep -Seconds 20
 
-    - name: Collect Backtest Results
-      shell: pwsh
+    - name: Collect backtest results
+      shell: powershell
       run: |
+        New-Item -ItemType Directory -Force -Path results
 
-        New-Item -ItemType Directory -Force results
-
-        Get-ChildItem "$env:USERPROFILE" -Recurse -Include backtest_report*.html,backtest_report*.xml,backtest_report*.csv -ErrorAction SilentlyContinue |
+        Get-ChildItem "$env:USERPROFILE" -Recurse -Include github_backtest*.html,github_backtest*.xml,github_backtest*.csv -ErrorAction SilentlyContinue |
         Copy-Item -Destination results -Force
-
-        Write-Host "Collected files:"
-        Get-ChildItem results
-
-    - name: Locate EX5
-      shell: pwsh
-      run: |
-
-        $file=Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
-
-        if($file){
-          Write-Host ".ex5 file generation confirmation: EX5 file created"
-          New-Item -ItemType Directory -Force compiled
-          Copy-Item $file.FullName compiled\
-        }
-        else{
-          Write-Error "Compilation failed"
-          exit 1
-        }
 
     - name: Upload compiled EA
       uses: actions/upload-artifact@v4
@@ -188,7 +107,7 @@ ShutdownTerminal=1
         name: compiled-ex5
         path: compiled
 
-    - name: Upload Backtest Results
+    - name: Upload backtest results
       uses: actions/upload-artifact@v4
       with:
         name: backtest-results
