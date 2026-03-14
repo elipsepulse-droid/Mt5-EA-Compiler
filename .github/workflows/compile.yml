@@ -1,157 +1,155 @@
-name: MT5 EA Compile + Analysis + Backtest Logs
+name: Compile MT5 EA
 
 on:
   workflow_dispatch:
 
 jobs:
-  mt5:
+  build:
     runs-on: windows-latest
 
     steps:
 
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Download MT5
-        shell: pwsh
-        run: |
-          Invoke-WebRequest https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe -OutFile mt5setup.exe
+    - name: Download MetaTrader 5
+      run: |
+        Invoke-WebRequest https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe -OutFile mt5setup.exe
 
-      - name: Install MT5
-        shell: pwsh
-        run: |
-          Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
+    - name: Install MT5
+      run: |
+        Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -Wait
 
-      - name: Prepare MT5 Data Folder
-        shell: pwsh
-        run: |
+    - name: Set MetaEditor
+      run: |
+        echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
+        echo "TERMINAL=C:\Program Files\MetaTrader 5\terminal64.exe" >> $env:GITHUB_ENV
 
-          $terminalFolder = Get-ChildItem "$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal" | Select-Object -First 1
-          $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\$($terminalFolder.Name)\MQL5"
+    - name: Download MQL5 Include Library
+      run: |
+        git clone https://github.com/EA31337/EA31337-classes.git mql_lib
 
-          New-Item -ItemType Directory -Force "$mql\Experts"
+    - name: Prepare MQL5 folders
+      run: |
+        $mql="$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal\Common\MQL5"
+        New-Item -ItemType Directory -Force -Path "$mql\Experts"
+        New-Item -ItemType Directory -Force -Path "$mql\Include"
 
-          Copy-Item *.mq5 "$mql\Experts\" -Force
+        Copy-Item EA_DANE_AUTO_BOT2.mq5 "$mql\Experts\EA_DANE_AUTO_BOT2.mq5"
+        Copy-Item -Recurse mql_lib\* "$mql\Include"
 
-          echo "MQLPATH=$mql" >> $env:GITHUB_ENV
-          echo "TERMINAL=C:\Program Files\MetaTrader 5\terminal64.exe" >> $env:GITHUB_ENV
-          echo "METAEDITOR=C:\Program Files\MetaTrader 5\metaeditor64.exe" >> $env:GITHUB_ENV
+        echo "MQLPATH=$mql" >> $env:GITHUB_ENV
 
-      - name: Compile EA
-        shell: pwsh
-        run: |
+    - name: Compile EA
+      run: |
+        & "$env:METAEDITOR" /compile:"$env:MQLPATH\Experts\EA_DANE_AUTO_BOT2.mq5" /log:compile.log
 
-          $mq5 = Get-ChildItem "$env:MQLPATH\Experts\*.mq5" | Select-Object -First 1
+    - name: Show log
+      run: |
+        Get-Content compile.log
 
-          & "$env:METAEDITOR" /compile:$mq5.FullName /log:compile.log
-
-      - name: Show Compile Log
-        shell: pwsh
-        run: |
-          Get-Content compile.log
-
-      - name: Static Code Analysis
-        shell: pwsh
-        run: |
-
-          $file = Get-ChildItem "$env:MQLPATH\Experts\*.mq5" | Select-Object -First 1
-          $code = Get-Content $file.FullName
-
-          $lineCount = $code.Count
-          $functionCount = ($code | Select-String -Pattern "OnInit|OnTick|OnTimer|OnDeinit").Count
-          $includeCount = ($code | Select-String -Pattern "#include").Count
-          $classCount = ($code | Select-String -Pattern "\bclass\b").Count
-          $structCount = ($code | Select-String -Pattern "\bstruct\b").Count
-          $enumCount = ($code | Select-String -Pattern "\benum\b").Count
-          $inputCount = ($code | Select-String -Pattern "\binput\b").Count
-          $globalCount = ($code | Select-String -Pattern "\bextern\b").Count
-
-          $orderSendCount = ($code | Select-String -Pattern "OrderSend").Count
-          $orderAsyncCount = ($code | Select-String -Pattern "OrderSendAsync").Count
-          $buyCount = ($code | Select-String -Pattern "BUY").Count
-          $sellCount = ($code | Select-String -Pattern "SELL").Count
-          $closeCount = ($code | Select-String -Pattern "PositionClose").Count
-
-          Write-Output "================ BASIC ANALYSIS ================"
-          Write-Output "Total Lines: $lineCount"
-          Write-Output "Function Count: $functionCount"
-          Write-Output "Include Files: $includeCount"
-          Write-Output "Classes: $classCount"
-          Write-Output "Structures: $structCount"
-          Write-Output "Enumerations: $enumCount"
-          Write-Output "Global Variables: $globalCount"
-          Write-Output "Input Parameters: $inputCount"
-
-          Write-Output ""
-          Write-Output "================ TRADING RISK ANALYSIS ================"
-          Write-Output "OrderSend Calls: $orderSendCount"
-          Write-Output "OrderSendAsync Calls: $orderAsyncCount"
-          Write-Output "Buy Order Calls: $buyCount"
-          Write-Output "Sell Order Calls: $sellCount"
-          Write-Output "PositionClose Calls: $closeCount"
-
-          if($orderSendCount -gt 5){
-            Write-Output "Risk Flag: Grid strategy detected"
-          }
-
-      - name: Create Tester Config
-        shell: pwsh
-        run: |
-
-          $config=@"
-[Tester]
-Expert=EA_DANE_AUTO_BOT2
+    - name: Backtesting Configuration
+      shell: pwsh
+      run: |
+        $tester = @"
+[Common]
+Login=0
+Password=
+Server=
+TestExpert=EA_DANE_AUTO_BOT2
 Symbol=XAUUSD
 Period=M5
 Model=0
 Optimization=0
-FromDate=2023.01.01
-ToDate=2024.01.01
+FromDate=2022.01.01
+ToDate=2025.01.01
 Deposit=10000
 Currency=USD
 Leverage=100
+Report=backtest_report
+ReplaceReport=1
 ShutdownTerminal=1
 "@
 
-          $config | Out-File tester.ini -Encoding ASCII
+        $tester | Out-File tester.ini -Encoding ASCII
 
-      - name: Run Strategy Tester
-        shell: pwsh
-        run: |
+    - name: Run Strategy Tester
+      shell: pwsh
+      run: |
+        & "$env:TERMINAL" /portable /config:tester.ini
+        Start-Sleep -Seconds 30
 
-          & "$env:TERMINAL" /portable /config:tester.ini
+    - name: Parse Backtest Results
+      shell: pwsh
+      run: |
 
-          Start-Sleep 90
+        Write-Host ""
+        Write-Host "================ BACKTEST SUMMARY ================"
 
-      - name: Show Backtest Logs
-        shell: pwsh
-        run: |
+        $report = Get-ChildItem -Recurse -Filter "backtest_report*.html" -ErrorAction SilentlyContinue
 
-          $logs = Get-ChildItem "$env:USERPROFILE\AppData\Roaming\MetaQuotes\Terminal" -Recurse -Filter *.log |
-                  Sort-Object LastWriteTime -Descending |
-                  Select-Object -First 5
+        if($report){
 
-          Write-Output ""
-          Write-Output "================ BACKTEST LOGS ================"
+          $content = Get-Content $report.FullName
 
-          foreach($log in $logs){
-            Write-Output ""
-            Write-Output "Log File: $($log.FullName)"
-            Get-Content $log.FullName -Tail 40
+          function Extract($pattern){
+            $match = $content | Select-String $pattern | Select -First 1
+            if($match){ return $match.Line } else { return "Data not found" }
           }
 
-      - name: Save EX5
-        shell: pwsh
-        run: |
+          Write-Host "Symbol: XAUUSD"
+          Write-Host "Timeframe: M5"
+          Write-Host "Test Period: 2022.01.01 - 2025.01.01"
 
+          Write-Host ""
+          Write-Host "--------------- PERFORMANCE METRICS ---------------"
+          Write-Host (Extract "Total Net Profit")
+          Write-Host (Extract "Gross Profit")
+          Write-Host (Extract "Gross Loss")
+          Write-Host (Extract "Profit Factor")
+          Write-Host (Extract "Expected Payoff")
+          Write-Host (Extract "Recovery Factor")
+          Write-Host (Extract "Sharpe Ratio")
+
+          Write-Host ""
+          Write-Host "--------------- TRADE STATISTICS ---------------"
+          Write-Host (Extract "Total Trades")
+          Write-Host (Extract "Short Trades")
+          Write-Host (Extract "Long Trades")
+          Write-Host (Extract "Profit Trades")
+          Write-Host (Extract "Loss Trades")
+
+          Write-Host ""
+          Write-Host "--------------- RISK ANALYSIS ---------------"
+          Write-Host (Extract "Balance Drawdown Maximal")
+          Write-Host (Extract "Equity Drawdown Maximal")
+          Write-Host (Extract "Balance Drawdown Relative")
+          Write-Host (Extract "Equity Drawdown Relative")
+
+          Write-Host ""
+          Write-Host "--------------- EXECUTION DETAILS ---------------"
+          Write-Host (Extract "Ticks modelled")
+          Write-Host (Extract "Modeling quality")
+          Write-Host (Extract "Spread")
+
+        }
+        else{
+          Write-Host "Backtest report not found"
+        }
+
+    - name: Find EX5
+      run: |
+        $file = Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
+        if($file){
           New-Item -ItemType Directory -Force compiled
+          Copy-Item $file.FullName compiled\
+        } else {
+          Write-Error "Compilation failed"
+          exit 1
+        }
 
-          $ex5 = Get-ChildItem "$env:MQLPATH\Experts" -Filter *.ex5 -Recurse
-
-          Copy-Item $ex5.FullName compiled\
-
-      - name: Upload EX5
-        uses: actions/upload-artifact@v4
-        with:
-          name: compiled-ex5
-          path: compiled
+    - name: Upload EX5
+      uses: actions/upload-artifact@v4
+      with:
+        name: compiled-ea
+        path: compiled
