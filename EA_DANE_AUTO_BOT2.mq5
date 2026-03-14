@@ -1,6 +1,3 @@
-//+------------------------------------------------------------------+
-//| Grid RSI EMA EA (MT5 - Cloud Compile Compatible)                |
-//+------------------------------------------------------------------+
 #property strict
 
 input double LotSize=0.01;
@@ -34,14 +31,12 @@ int emaTrendSlow;
 int emaExitFast;
 int emaExitSlow;
 
-//+------------------------------------------------------------------+
 double Pip()
 {
-   if(_Digits==3 || _Digits==5)
-      return _Point*10;
+   if(_Digits==3 || _Digits==5) return _Point*10;
    return _Point;
 }
-//+------------------------------------------------------------------+
+
 int OnInit()
 {
    rsiHandle=iRSI(_Symbol,_Period,RSI_Period,PRICE_CLOSE);
@@ -54,7 +49,7 @@ int OnInit()
 
    return(INIT_SUCCEEDED);
 }
-//+------------------------------------------------------------------+
+
 void BuildGrid()
 {
    double spacing=GridSpacingPips*Pip();
@@ -65,28 +60,33 @@ void BuildGrid()
       GridSell[i]=StartPrice+(spacing*(i+1));
    }
 }
-//+------------------------------------------------------------------+
+
 bool LevelUsed(double price)
 {
    for(int i=0;i<PositionsTotal();i++)
    {
-      if(PositionSelectByIndex(i))
+      ulong ticket=PositionGetTicket(i);
+
+      if(PositionSelectByTicket(ticket))
       {
          if(PositionGetString(POSITION_SYMBOL)==_Symbol)
          {
             double open=PositionGetDouble(POSITION_PRICE_OPEN);
+
             if(MathAbs(open-price)<Pip()*5)
                return true;
          }
       }
    }
+
    return false;
 }
-//+------------------------------------------------------------------+
+
 void OpenTrade(bool buy)
 {
    MqlTradeRequest req;
    MqlTradeResult res;
+
    ZeroMemory(req);
    ZeroMemory(res);
 
@@ -112,13 +112,14 @@ void OpenTrade(bool buy)
    req.volume=LotSize;
    req.price=price;
    req.tp=tp;
-   req.deviation=20;
    req.magic=55555;
-   req.type_filling=ORDER_FILLING_FOK;
+   req.deviation=20;
+   req.type_filling=ORDER_FILLING_IOC;
 
-   OrderSend(req,res);
+   if(!OrderSend(req,res))
+      Print("OrderSend failed: ",res.retcode);
 }
-//+------------------------------------------------------------------+
+
 int CheckSignal()
 {
    double rsi[2];
@@ -132,26 +133,29 @@ int CheckSignal()
 
    return 0;
 }
-//+------------------------------------------------------------------+
+
 bool TrendBuy()
 {
    double f[1],s[1];
    CopyBuffer(emaTrendFast,0,0,1,f);
    CopyBuffer(emaTrendSlow,0,0,1,s);
+
    return f[0]>s[0];
 }
-//+------------------------------------------------------------------+
+
 bool TrendSell()
 {
    double f[1],s[1];
    CopyBuffer(emaTrendFast,0,0,1,f);
    CopyBuffer(emaTrendSlow,0,0,1,s);
+
    return f[0]<s[0];
 }
-//+------------------------------------------------------------------+
+
 bool ExitSignal()
 {
    double f[2],s[2];
+
    CopyBuffer(emaExitFast,0,0,2,f);
    CopyBuffer(emaExitSlow,0,0,2,s);
 
@@ -160,7 +164,7 @@ bool ExitSignal()
 
    return false;
 }
-//+------------------------------------------------------------------+
+
 void ManageGrid()
 {
    double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
@@ -180,17 +184,17 @@ void ManageGrid()
       }
    }
 }
-//+------------------------------------------------------------------+
+
 void CloseAll()
 {
    for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      if(PositionSelectByIndex(i))
+      ulong ticket=PositionGetTicket(i);
+
+      if(PositionSelectByTicket(ticket))
       {
          if(PositionGetString(POSITION_SYMBOL)==_Symbol)
          {
-            ulong ticket=PositionGetInteger(POSITION_TICKET);
-
             MqlTradeRequest req;
             MqlTradeResult res;
 
@@ -221,14 +225,16 @@ void CloseAll()
 
    GridActive=false;
 }
-//+------------------------------------------------------------------+
+
 double GridProfit()
 {
    double profit=0;
 
    for(int i=0;i<PositionsTotal();i++)
    {
-      if(PositionSelectByIndex(i))
+      ulong ticket=PositionGetTicket(i);
+
+      if(PositionSelectByTicket(ticket))
       {
          if(PositionGetString(POSITION_SYMBOL)==_Symbol)
             profit+=PositionGetDouble(POSITION_PROFIT);
@@ -237,7 +243,7 @@ double GridProfit()
 
    return profit;
 }
-//+------------------------------------------------------------------+
+
 void OnTick()
 {
    double spacing=GridSpacingPips*Pip();
@@ -280,4 +286,3 @@ void OnTick()
       }
    }
 }
-//+------------------------------------------------------------------+
