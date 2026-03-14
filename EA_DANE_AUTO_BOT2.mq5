@@ -1,41 +1,30 @@
 //+------------------------------------------------------------------+
-//| Grid RSI EMA EA (MT5)                                           |
-//| Strategy based on provided configuration                         |
+//| Grid RSI EMA EA (MT5 - Cloud Compile Compatible)                |
 //+------------------------------------------------------------------+
 #property strict
 
-#include <Trade/Trade.mqh>
-CTrade trade;
+input double LotSize=0.01;
+input int GridSize=10;
+input int GridSpacingPips=500;
 
-//================ INPUT PARAMETERS =================//
+input double TP_Multiplier=1.0;
+input double MaxProfitMulti=5.0;
 
-input double   LotSize            = 0.01;     // Volume per order
-input int      GridSize           = 10;       // Max grid levels
-input int      GridSpacingPips    = 500;      // Grid spacing
-input double   TP_Multiplier      = 1.0;      // Take profit = spacing * multiplier
-input double   MaxProfitMulti     = 5.0;      // Close grid at profit
-input double   StopLossMulti      = 10.0;     // Grid stop loss
+input int RSI_Period=14;
+input double RSI_BuyLevel=40;
+input double RSI_SellLevel=60;
 
-// RSI
-input int      RSI_Period         = 14;
-input double   RSI_BuyLevel       = 40;
-input double   RSI_SellLevel      = 60;
+input int EMA_Trend_Fast=100;
+input int EMA_Trend_Slow=300;
 
-// Trend Filter
-input int      EMA_Trend_Fast     = 100;
-input int      EMA_Trend_Slow     = 300;
+input int EMA_Exit_Fast=50;
+input int EMA_Exit_Slow=200;
 
-// Exit Rule
-input int      EMA_Exit_Fast      = 50;
-input int      EMA_Exit_Slow      = 200;
+double GridBuy[100];
+double GridSell[100];
 
-//================ GLOBAL VARIABLES =================//
-
-double GridLevelsBuy[100];
-double GridLevelsSell[100];
-
-bool   GridActive=false;
-bool   GridDirectionBuy=false;
+bool GridActive=false;
+bool GridBuyDirection=false;
 
 double StartPrice=0;
 
@@ -46,7 +35,12 @@ int emaExitFast;
 int emaExitSlow;
 
 //+------------------------------------------------------------------+
-//| Expert initialization                                            |
+double Pip()
+{
+   if(_Digits==3 || _Digits==5)
+      return _Point*10;
+   return _Point;
+}
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -60,55 +54,70 @@ int OnInit()
 
    return(INIT_SUCCEEDED);
 }
-
 //+------------------------------------------------------------------+
-//| Get Pip Value                                                    |
-//+------------------------------------------------------------------+
-double PipValue()
+void BuildGrid()
 {
-   if(_Digits==3 || _Digits==5)
-      return(_Point*10);
-   return(_Point);
-}
+   double spacing=GridSpacingPips*Pip();
 
-//+------------------------------------------------------------------+
-//| Check if level already traded                                    |
+   for(int i=0;i<GridSize;i++)
+   {
+      GridBuy[i]=StartPrice-(spacing*(i+1));
+      GridSell[i]=StartPrice+(spacing*(i+1));
+   }
+}
 //+------------------------------------------------------------------+
 bool LevelUsed(double price)
 {
    for(int i=0;i<PositionsTotal();i++)
    {
-      ulong ticket=PositionGetTicket(i);
-      if(PositionSelectByTicket(ticket))
+      if(PositionSelectByIndex(i))
       {
          if(PositionGetString(POSITION_SYMBOL)==_Symbol)
          {
             double open=PositionGetDouble(POSITION_PRICE_OPEN);
-            if(MathAbs(open-price)<PipValue()*10)
+            if(MathAbs(open-price)<Pip()*5)
                return true;
          }
       }
    }
    return false;
 }
-
 //+------------------------------------------------------------------+
-//| Build Grid Levels                                                |
-//+------------------------------------------------------------------+
-void BuildGrid()
+void OpenTrade(bool buy)
 {
-   double pip=PipValue();
-   double spacing=GridSpacingPips*pip;
+   MqlTradeRequest req;
+   MqlTradeResult res;
+   ZeroMemory(req);
+   ZeroMemory(res);
 
-   for(int i=0;i<GridSize;i++)
+   double price;
+   double tp;
+   double spacing=GridSpacingPips*Pip();
+
+   if(buy)
    {
-      GridLevelsBuy[i]=StartPrice-(spacing*(i+1));
-      GridLevelsSell[i]=StartPrice+(spacing*(i+1));
+      price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      tp=price+(spacing*TP_Multiplier);
+      req.type=ORDER_TYPE_BUY;
    }
-}
+   else
+   {
+      price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      tp=price-(spacing*TP_Multiplier);
+      req.type=ORDER_TYPE_SELL;
+   }
 
-//+------------------------------------------------------------------+
-//| Check RSI Signal                                                 |
+   req.action=TRADE_ACTION_DEAL;
+   req.symbol=_Symbol;
+   req.volume=LotSize;
+   req.price=price;
+   req.tp=tp;
+   req.deviation=20;
+   req.magic=55555;
+   req.type_filling=ORDER_FILLING_FOK;
+
+   OrderSend(req,res);
+}
 //+------------------------------------------------------------------+
 int CheckSignal()
 {
@@ -123,30 +132,22 @@ int CheckSignal()
 
    return 0;
 }
-
-//+------------------------------------------------------------------+
-//| Trend Filter                                                     |
 //+------------------------------------------------------------------+
 bool TrendBuy()
 {
    double f[1],s[1];
    CopyBuffer(emaTrendFast,0,0,1,f);
    CopyBuffer(emaTrendSlow,0,0,1,s);
-
    return f[0]>s[0];
 }
-
+//+------------------------------------------------------------------+
 bool TrendSell()
 {
    double f[1],s[1];
    CopyBuffer(emaTrendFast,0,0,1,f);
    CopyBuffer(emaTrendSlow,0,0,1,s);
-
    return f[0]<s[0];
 }
-
-//+------------------------------------------------------------------+
-//| Exit Rule                                                        |
 //+------------------------------------------------------------------+
 bool ExitSignal()
 {
@@ -159,79 +160,67 @@ bool ExitSignal()
 
    return false;
 }
-
-//+------------------------------------------------------------------+
-//| Open Trade                                                       |
-//+------------------------------------------------------------------+
-void OpenTrade(bool buy)
-{
-   double pip=PipValue();
-   double spacing=GridSpacingPips*pip;
-
-   double price=buy?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
-
-   double tp;
-
-   if(buy)
-      tp=price+(spacing*TP_Multiplier);
-   else
-      tp=price-(spacing*TP_Multiplier);
-
-   if(buy)
-      trade.Buy(LotSize,_Symbol,price,0,tp);
-   else
-      trade.Sell(LotSize,_Symbol,price,0,tp);
-}
-
-//+------------------------------------------------------------------+
-//| Manage Grid                                                      |
 //+------------------------------------------------------------------+
 void ManageGrid()
 {
-   double priceBid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-   double priceAsk=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
 
    for(int i=0;i<GridSize;i++)
    {
-      if(GridDirectionBuy)
+      if(GridBuyDirection)
       {
-         if(priceBid<=GridLevelsBuy[i] && !LevelUsed(GridLevelsBuy[i]))
-         {
+         if(bid<=GridBuy[i] && !LevelUsed(GridBuy[i]))
             OpenTrade(true);
-         }
       }
       else
       {
-         if(priceAsk>=GridLevelsSell[i] && !LevelUsed(GridLevelsSell[i]))
-         {
+         if(ask>=GridSell[i] && !LevelUsed(GridSell[i]))
             OpenTrade(false);
-         }
       }
    }
 }
-
-//+------------------------------------------------------------------+
-//| Close All Positions                                              |
 //+------------------------------------------------------------------+
 void CloseAll()
 {
    for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      ulong ticket=PositionGetTicket(i);
-      if(PositionSelectByTicket(ticket))
+      if(PositionSelectByIndex(i))
       {
          if(PositionGetString(POSITION_SYMBOL)==_Symbol)
          {
-            trade.PositionClose(ticket);
+            ulong ticket=PositionGetInteger(POSITION_TICKET);
+
+            MqlTradeRequest req;
+            MqlTradeResult res;
+
+            ZeroMemory(req);
+            ZeroMemory(res);
+
+            req.action=TRADE_ACTION_DEAL;
+            req.position=ticket;
+            req.symbol=_Symbol;
+            req.volume=PositionGetDouble(POSITION_VOLUME);
+            req.deviation=20;
+
+            if(PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)
+            {
+               req.price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+               req.type=ORDER_TYPE_SELL;
+            }
+            else
+            {
+               req.price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+               req.type=ORDER_TYPE_BUY;
+            }
+
+            OrderSend(req,res);
          }
       }
    }
 
    GridActive=false;
 }
-
-//+------------------------------------------------------------------+
-//| Calculate Profit                                                 |
 //+------------------------------------------------------------------+
 double GridProfit()
 {
@@ -239,27 +228,19 @@ double GridProfit()
 
    for(int i=0;i<PositionsTotal();i++)
    {
-      ulong ticket=PositionGetTicket(i);
-
-      if(PositionSelectByTicket(ticket))
+      if(PositionSelectByIndex(i))
       {
          if(PositionGetString(POSITION_SYMBOL)==_Symbol)
-         {
             profit+=PositionGetDouble(POSITION_PROFIT);
-         }
       }
    }
 
    return profit;
 }
-
-//+------------------------------------------------------------------+
-//| Expert tick                                                      |
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   double pip=PipValue();
-   double spacing=GridSpacingPips*pip;
+   double spacing=GridSpacingPips*Pip();
 
    if(!GridActive)
    {
@@ -267,7 +248,7 @@ void OnTick()
 
       if(signal==1 && TrendBuy())
       {
-         GridDirectionBuy=true;
+         GridBuyDirection=true;
          StartPrice=SymbolInfoDouble(_Symbol,SYMBOL_BID);
          BuildGrid();
          GridActive=true;
@@ -275,7 +256,7 @@ void OnTick()
 
       if(signal==-1 && TrendSell())
       {
-         GridDirectionBuy=false;
+         GridBuyDirection=false;
          StartPrice=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
          BuildGrid();
          GridActive=true;
@@ -292,9 +273,7 @@ void OnTick()
          return;
       }
 
-      double target=spacing*MaxProfitMulti;
-
-      if(GridProfit()>=target)
+      if(GridProfit()>=spacing*MaxProfitMulti)
       {
          CloseAll();
          return;
