@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
-//| EA_DANE_AUTO_BOT3 - Compiled Signal Grid EA                      |
-//| Signals compiled into larger trades (5 signals → 1 trade)       |
-//| No Trade.mqh dependency / Cloud compile compatible              |
+//| EA_DANE_AUTO_BOT4 - Volume Aggregation Grid EA                   |
+//| Signal compilation + aggregated grid exposure                    |
+//| Designed to reduce micro trades while keeping same exposure     |
 //+------------------------------------------------------------------+
 #property strict
 
@@ -23,7 +23,6 @@ input int SlowTrendMA = 300;
 input int ExitFastMA = 50;
 input int ExitSlowMA = 200;
 
-// Updated parameters requested
 input double TakeProfitSpacing = 10.0;
 input double BasketProfitSpacing = 5.0;
 input double BasketStopSpacing = 1.0;
@@ -49,6 +48,9 @@ datetime lastSignalBar=0;
 
 int BuySignalCounter=0;
 int SellSignalCounter=0;
+
+int buyGridLevel=0;
+int sellGridLevel=0;
 
 //================ INITIALIZATION =================//
 
@@ -216,10 +218,7 @@ void ClosePosition(ulong ticket)
       req.price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    }
 
-   bool sent=OrderSend(req,res);
-
-   if(!sent || res.retcode!=10009)
-      Print("Close failed retcode: ",res.retcode);
+   OrderSend(req,res);
 }
 
 //================ CLOSE ALL =================//
@@ -239,9 +238,12 @@ void CloseAll()
 
    buyGridActive=false;
    sellGridActive=false;
+
+   buyGridLevel=0;
+   sellGridLevel=0;
 }
 
-//================ ENTRY SIGNAL (COMPILED) =================//
+//================ ENTRY SIGNAL =================//
 
 void CheckEntrySignal()
 {
@@ -277,6 +279,7 @@ void CheckEntrySignal()
       {
          lastBuyPrice=ask;
          buyGridActive=true;
+         buyGridLevel=1;
          BuySignalCounter-=CompileSignals;
       }
    }
@@ -291,6 +294,7 @@ void CheckEntrySignal()
       {
          lastSellPrice=bid;
          sellGridActive=true;
+         sellGridLevel=1;
          SellSignalCounter-=CompileSignals;
       }
    }
@@ -305,32 +309,36 @@ void ManageGrid()
 
    if(buyGridActive)
    {
-      int buyCount=CountPositions(POSITION_TYPE_BUY);
-
-      if(buyCount < GridSize)
+      if(buyGridLevel < GridSize)
       {
          if(lastBuyPrice - bid >= gridSpacing)
          {
+            double volume=LotSize*CompileSignals;
             double tp=ask+(gridSpacing*TakeProfitSpacing);
 
-            if(OpenBuy(LotSize,tp))
+            if(OpenBuy(volume,tp))
+            {
                lastBuyPrice=ask;
+               buyGridLevel++;
+            }
          }
       }
    }
 
    if(sellGridActive)
    {
-      int sellCount=CountPositions(POSITION_TYPE_SELL);
-
-      if(sellCount < GridSize)
+      if(sellGridLevel < GridSize)
       {
          if(ask - lastSellPrice >= gridSpacing)
          {
+            double volume=LotSize*CompileSignals;
             double tp=bid-(gridSpacing*TakeProfitSpacing);
 
-            if(OpenSell(LotSize,tp))
+            if(OpenSell(volume,tp))
+            {
                lastSellPrice=bid;
+               sellGridLevel++;
+            }
          }
       }
    }
