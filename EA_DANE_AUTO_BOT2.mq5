@@ -1,7 +1,8 @@
 //+------------------------------------------------------------------+
 //| EA_DANE_AUTO_BOT4 - Volume Aggregation Grid EA                   |
-//| Signal compilation + aggregated grid exposure                    |
-//| Designed to reduce micro trades while keeping same exposure     |
+//| Signals compiled into larger trades                              |
+//| Grid also uses compiled volume to avoid micro trades             |
+//| Warning-free version                                             |
 //+------------------------------------------------------------------+
 #property strict
 
@@ -145,7 +146,7 @@ bool OpenBuy(double volume,double tp)
    req.deviation=20;
    req.magic=20260314;
 
-   bool sent=OrderSend(req,res);
+   bool sent = OrderSend(req,res);
 
    if(!sent || res.retcode!=10009)
    {
@@ -175,7 +176,7 @@ bool OpenSell(double volume,double tp)
    req.deviation=20;
    req.magic=20260314;
 
-   bool sent=OrderSend(req,res);
+   bool sent = OrderSend(req,res);
 
    if(!sent || res.retcode!=10009)
    {
@@ -218,7 +219,10 @@ void ClosePosition(ulong ticket)
       req.price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    }
 
-   OrderSend(req,res);
+   bool sent = OrderSend(req,res);
+
+   if(!sent || res.retcode!=10009)
+      Print("Close failed retcode: ",res.retcode);
 }
 
 //================ CLOSE ALL =================//
