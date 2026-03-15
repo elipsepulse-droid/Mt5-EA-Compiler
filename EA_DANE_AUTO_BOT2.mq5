@@ -1,6 +1,7 @@
 //+------------------------------------------------------------------+
-//| EA_DANE_AUTO_BOT2 - Grid RSI EMA EA (Cloud Compile Safe)        |
-//| No Trade.mqh dependency / OrderSend validation included         |
+//| EA_DANE_AUTO_BOT3 - Compiled Signal Grid EA                      |
+//| Signals compiled into larger trades (5 signals → 1 trade)       |
+//| No Trade.mqh dependency / Cloud compile compatible              |
 //+------------------------------------------------------------------+
 #property strict
 
@@ -9,6 +10,8 @@
 input double LotSize = 0.01;
 input int GridSize = 10;
 input int GridSpacingPips = 500;
+
+input int CompileSignals = 5;
 
 input int RSIPeriod = 14;
 input double RSIBuyLevel = 40;
@@ -20,9 +23,10 @@ input int SlowTrendMA = 300;
 input int ExitFastMA = 50;
 input int ExitSlowMA = 200;
 
-input double TakeProfitSpacing = 1.0;
+// Updated parameters requested
+input double TakeProfitSpacing = 10.0;
 input double BasketProfitSpacing = 5.0;
-input double BasketStopSpacing = 10.0;
+input double BasketStopSpacing = 1.0;
 
 //================ GLOBAL VARIABLES =================//
 
@@ -43,11 +47,15 @@ bool sellGridActive=false;
 
 datetime lastSignalBar=0;
 
+int BuySignalCounter=0;
+int SellSignalCounter=0;
+
 //================ INITIALIZATION =================//
 
 int OnInit()
 {
    pip=_Point;
+
    if(_Digits==3 || _Digits==5)
       pip=_Point*10;
 
@@ -56,6 +64,7 @@ int OnInit()
    rsiHandle = iRSI(_Symbol,_Period,RSIPeriod,PRICE_CLOSE);
    fastMAHandle = iMA(_Symbol,_Period,FastTrendMA,0,MODE_EMA,PRICE_CLOSE);
    slowMAHandle = iMA(_Symbol,_Period,SlowTrendMA,0,MODE_EMA,PRICE_CLOSE);
+
    exitFastHandle = iMA(_Symbol,_Period,ExitFastMA,0,MODE_EMA,PRICE_CLOSE);
    exitSlowHandle = iMA(_Symbol,_Period,ExitSlowMA,0,MODE_EMA,PRICE_CLOSE);
 
@@ -232,7 +241,7 @@ void CloseAll()
    sellGridActive=false;
 }
 
-//================ ENTRY SIGNAL =================//
+//================ ENTRY SIGNAL (COMPILED) =================//
 
 void CheckEntrySignal()
 {
@@ -253,32 +262,36 @@ void CheckEntrySignal()
    bool downtrend = fastMA < slowMA;
 
    if(rsiPrev < RSIBuyLevel && rsiCur > RSIBuyLevel && uptrend)
-   {
-      if(CountPositions(POSITION_TYPE_BUY)==0)
-      {
-         double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-         double tp=ask+(gridSpacing*TakeProfitSpacing);
+      BuySignalCounter++;
 
-         if(OpenBuy(LotSize,tp))
-         {
-            lastBuyPrice=ask;
-            buyGridActive=true;
-         }
+   if(rsiPrev > RSISellLevel && rsiCur < RSISellLevel && downtrend)
+      SellSignalCounter++;
+
+   if(BuySignalCounter >= CompileSignals)
+   {
+      double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      double volume=LotSize*CompileSignals;
+      double tp=ask+(gridSpacing*TakeProfitSpacing);
+
+      if(OpenBuy(volume,tp))
+      {
+         lastBuyPrice=ask;
+         buyGridActive=true;
+         BuySignalCounter-=CompileSignals;
       }
    }
 
-   if(rsiPrev > RSISellLevel && rsiCur < RSISellLevel && downtrend)
+   if(SellSignalCounter >= CompileSignals)
    {
-      if(CountPositions(POSITION_TYPE_SELL)==0)
-      {
-         double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-         double tp=bid-(gridSpacing*TakeProfitSpacing);
+      double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      double volume=LotSize*CompileSignals;
+      double tp=bid-(gridSpacing*TakeProfitSpacing);
 
-         if(OpenSell(LotSize,tp))
-         {
-            lastSellPrice=bid;
-            sellGridActive=true;
-         }
+      if(OpenSell(volume,tp))
+      {
+         lastSellPrice=bid;
+         sellGridActive=true;
+         SellSignalCounter-=CompileSignals;
       }
    }
 }
