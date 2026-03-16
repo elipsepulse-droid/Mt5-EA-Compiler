@@ -1,8 +1,6 @@
 //+------------------------------------------------------------------+
-//| EA_DANE_AUTO_BOT13 - Advanced Stability Gold Scalper             |
-//| Architecture preserved from BOT12                                |
-//| Added professional risk and execution improvements               |
-//| Compatible with MT5                                              |
+//| EA_DANE_AUTO_BOT14 - Enhanced Stability Gold Scalper             |
+//| Corrected Stable Version                                         |
 //+------------------------------------------------------------------+
 #property strict
 #include <Trade/Trade.mqh>
@@ -48,7 +46,6 @@ input double ExposureHardCap = 0.002;
 
 input int RetryAttempts = 3;
 
-//---- Professional additions
 input double EmergencySL_ATR = 6.0;
 input double TP_ATR = 1.5;
 input int MaxTradeSeconds = 900;
@@ -81,6 +78,8 @@ bool sellGridActive=false;
 datetime lastTradeTime=0;
 double peakEquity=0;
 double avgSpread=0;
+
+double prevTick=0;
 
 MqlTick tick;
 
@@ -175,7 +174,12 @@ double GetLotSize(int depth,double atr)
       if(lot<LotSize) lot=LotSize;
    }
 
-   lot=lot/(1+(depth*0.6));
+   lot = lot/(1+(depth*0.45));
+
+   double spread=(SymbolInfoDouble(_Symbol,SYMBOL_ASK)-SymbolInfoDouble(_Symbol,SYMBOL_BID))/_Point;
+
+   if(spread > avgSpread*1.5) lot*=0.6;
+   if(spread > avgSpread*2) lot*=0.4;
 
    return NormalizeLot(lot);
 }
@@ -235,6 +239,27 @@ void CloseAll()
 
    buyGridActive=false;
    sellGridActive=false;
+}
+
+//+------------------------------------------------------------------+
+
+void BasketBreakEven()
+{
+   double totalProfit=0;
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      if(PositionSelectByIndex(i))
+      {
+         if(PositionGetString(POSITION_SYMBOL)==_Symbol)
+            totalProfit+=PositionGetDouble(POSITION_PROFIT);
+      }
+   }
+
+   double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+
+   if(totalProfit > balance*0.002)
+      CloseAll();
 }
 
 //+------------------------------------------------------------------+
@@ -314,7 +339,8 @@ void ManagePositions()
 
          datetime openTime=(datetime)PositionGetInteger(POSITION_TIME);
 
-         if(TimeCurrent()-openTime > MaxTradeSeconds)
+         if(TimeCurrent()-openTime > MaxTradeSeconds &&
+            PositionGetDouble(POSITION_PROFIT)<0)
          {
             ulong ticket=PositionGetInteger(POSITION_TICKET);
             trade.PositionClose(ticket);
@@ -343,45 +369,31 @@ void OnTick()
       return;
    }
 
+   BasketBreakEven();
+
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
    if(equity<peakEquity*EquityProtection)
       return;
 
    if(equity>peakEquity) peakEquity=equity;
 
-   if(smoothedATR==0) smoothedATR=atr;
-   if(atrLongAvg==0) atrLongAvg=atr;
+   bool uptrend = fastMA>slowMA && tick.bid>fastHTF && adx>25;
+   bool downtrend = fastMA<slowMA && tick.bid<fastHTF && adx>25;
 
-   smoothedATR=(smoothedATR*0.8)+(atr*0.2);
-   atrLongAvg=(atrLongAvg*0.95)+(atr*0.05);
-
-   if(atr>atrLongAvg*3) return;
-
-   gridSpacing=(GridSpacingPips*pip)+(smoothedATR*ATRMultiplier);
-
-   double tickMove=MathAbs(tick.bid-lastBuyPrice);
-   if(tickMove>atr*TickVolatilityATR) return;
-
-   bool uptrend=fastMA>slowMA && tick.bid>fastHTF;
-   bool downtrend=fastMA<slowMA && tick.bid<fastHTF;
-
-   if(TimeCurrent()-lastTradeTime<CooldownSeconds) return;
+   if(TimeCurrent()-lastTradeTime < CooldownSeconds) return;
 
    if(adx<MinADX) return;
 
-   int totalPositions=PositionsTotal();
+   int totalPositions=CountPositions(POSITION_TYPE_BUY)+CountPositions(POSITION_TYPE_SELL);
    if(totalPositions>=MaxTotalPositions) return;
 
    double exposure=TotalExposure();
-   double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+   if(exposure>ExposureHardCap) return;
 
-   if(exposure>balance*ExposureHardCap)
-      return;
+   double dynamicTP = TP_ATR;
+   double dynamicSL = EmergencySL_ATR;
 
-   double rsiSlope=rsiCur-rsiPrev;
-   if(MathAbs(rsiSlope)<0.2) return;
-
-   // BUY ENTRY
+   // BUY
    if(rsiPrev<RSIBuyLevel && rsiCur>RSIBuyLevel && uptrend && !sellGridActive)
    {
       int depth=CountPositions(POSITION_TYPE_BUY);
@@ -390,8 +402,8 @@ void OnTick()
       {
          double lot=GetLotSize(depth,atr);
 
-         double sl=tick.ask-(atr*EmergencySL_ATR);
-         double tp=tick.ask+(atr*TP_ATR);
+         double sl=tick.ask-(atr*dynamicSL);
+         double tp=tick.ask+(atr*dynamicTP);
 
          if(ExecuteBuy(lot,sl,tp))
          {
@@ -402,7 +414,7 @@ void OnTick()
       }
    }
 
-   // SELL ENTRY
+   // SELL
    if(rsiPrev>RSISellLevel && rsiCur<RSISellLevel && downtrend && !buyGridActive)
    {
       int depth=CountPositions(POSITION_TYPE_SELL);
@@ -411,8 +423,8 @@ void OnTick()
       {
          double lot=GetLotSize(depth,atr);
 
-         double sl=tick.bid+(atr*EmergencySL_ATR);
-         double tp=tick.bid-(atr*TP_ATR);
+         double sl=tick.bid+(atr*dynamicSL);
+         double tp=tick.bid-(atr*dynamicTP);
 
          if(ExecuteSell(lot,sl,tp))
          {
