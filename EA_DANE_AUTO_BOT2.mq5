@@ -1,353 +1,251 @@
 //+------------------------------------------------------------------+
-//| EA_DANE_AUTO_BOT14 - Corrected Compilation Version               |
-//| OrderSend return values fully validated                          |
+//| XAUUSD_M1_PRO_SCALPER_STRUCTURE                                  |
+//| Modular EA Architecture                                          |
 //+------------------------------------------------------------------+
 #property strict
+#include <Trade/Trade.mqh>
+
+CTrade trade;
 
 //================ INPUT PARAMETERS =================//
 
-input double LotSize = 0.01;
-input bool UseDynamicLot = true;
-input double RiskPercent = 0.5;
+input double FixedLot              = 0.01;
+input bool   UseDynamicLot         = true;
+input double RiskPercent           = 1.0;
 
-input int GridSize = 10;
-input int GridSpacingPips = 500;
+input int    RSIPeriod             = 14;
+input int    FastEMA               = 9;
+input int    SlowEMA               = 21;
 
-input int RSIPeriod = 14;
-input double RSIBuyLevel = 40;
-input double RSISellLevel = 60;
+input int    ATRPeriod             = 14;
+input double SL_ATR_Multiplier     = 1.5;
+input double TP_ATR_Multiplier     = 1.0;
 
-input int FastTrendMA = 100;
-input int SlowTrendMA = 300;
+input double MaxSpreadPoints       = 300;
+input int    MaxOpenTrades         = 5;
 
-input int ExitFastMA = 50;
-input int ExitSlowMA = 200;
+input double BreakevenTrigger      = 200;
+input double TrailingDistance      = 150;
 
-input int ADXPeriod = 14;
-input double MinADX = 20;
-
-input int ATRPeriod = 14;
-input double ATRMultiplier = 2.0;
-
-input int MaxSpreadPoints = 50;
-
-input double FloatingDDLimit = 0.03;
-
-input int MaxTotalPositions = 15;
-input int MaxBuyPositions = 10;
-input int MaxSellPositions = 10;
-
-input int CooldownSeconds = 300;
-input int MaxSlippage = 20;
-
-input double MarginExposureLimit = 0.35;
-input double ExposureHardCap = 0.002;
-
-input int RetryAttempts = 3;
-
-input double EmergencySL_ATR = 6.0;
-input double TP_ATR = 1.5;
-input int MaxTradeSeconds = 900;
-input double SpreadSpikeMultiplier = 2.5;
-input double EquityProtection = 0.92;
+input double MaxDrawdownPercent    = 20;
 
 //================ GLOBAL VARIABLES =================//
 
 int rsiHandle;
-int fastMAHandle;
-int slowMAHandle;
-int exitFastHandle;
-int exitSlowHandle;
+int emaFastHandle;
+int emaSlowHandle;
 int atrHandle;
-int adxHandle;
-int fastMA_HTF;
 
-double pip;
+double rsiBuffer[];
+double emaFastBuffer[];
+double emaSlowBuffer[];
+double atrBuffer[];
 
-double lastBuyPrice=0;
-double lastSellPrice=0;
-
-bool buyGridActive=false;
-bool sellGridActive=false;
-
-datetime lastTradeTime=0;
-
-double peakEquity=0;
-double avgSpread=0;
-
-MqlTick tick;
-MqlTradeRequest request;
-MqlTradeResult result;
-
+//+------------------------------------------------------------------+
+//| Initialization                                                   |
 //+------------------------------------------------------------------+
 
 int OnInit()
 {
-   pip=_Point;
-   if(_Digits==3 || _Digits==5) pip=_Point*10;
-
-   rsiHandle=iRSI(_Symbol,_Period,RSIPeriod,PRICE_CLOSE);
-   fastMAHandle=iMA(_Symbol,_Period,FastTrendMA,0,MODE_EMA,PRICE_CLOSE);
-   slowMAHandle=iMA(_Symbol,_Period,SlowTrendMA,0,MODE_EMA,PRICE_CLOSE);
-
-   exitFastHandle=iMA(_Symbol,_Period,ExitFastMA,0,MODE_EMA,PRICE_CLOSE);
-   exitSlowHandle=iMA(_Symbol,_Period,ExitSlowMA,0,MODE_EMA,PRICE_CLOSE);
-
-   atrHandle=iATR(_Symbol,_Period,ATRPeriod);
-   adxHandle=iADX(_Symbol,_Period,ADXPeriod);
-
-   fastMA_HTF=iMA(_Symbol,PERIOD_M15,FastTrendMA,0,MODE_EMA,PRICE_CLOSE);
-
-   peakEquity=AccountInfoDouble(ACCOUNT_EQUITY);
+   rsiHandle = iRSI(_Symbol,_Period,RSIPeriod,PRICE_CLOSE);
+   emaFastHandle = iMA(_Symbol,_Period,FastEMA,0,MODE_EMA,PRICE_CLOSE);
+   emaSlowHandle = iMA(_Symbol,_Period,SlowEMA,0,MODE_EMA,PRICE_CLOSE);
+   atrHandle = iATR(_Symbol,_Period,ATRPeriod);
 
    return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
+//| Tick Engine                                                      |
+//+------------------------------------------------------------------+
 
-bool SpreadOK()
+void OnTick()
 {
-   double spread=(SymbolInfoDouble(_Symbol,SYMBOL_ASK)-SymbolInfoDouble(_Symbol,SYMBOL_BID))/_Point;
+   if(!MarketConditionFilter()) return;
 
-   avgSpread=(avgSpread*0.9)+(spread*0.1);
+   TradeManager();
 
-   if(spread>MaxSpreadPoints) return false;
-   if(spread>avgSpread*SpreadSpikeMultiplier) return false;
+   if(PositionTotalCheck()) return;
+
+   int signal = SignalEngine();
+
+   if(signal == 1)
+      OpenBuy();
+
+   if(signal == -1)
+      OpenSell();
+}
+
+//+------------------------------------------------------------------+
+//| Market Filters                                                   |
+//+------------------------------------------------------------------+
+
+bool MarketConditionFilter()
+{
+   if(SpreadCheck()==false) return false;
+   if(VolatilityCheck()==false) return false;
+   if(DrawdownProtection()==false) return false;
 
    return true;
 }
 
-//+------------------------------------------------------------------+
-
-bool FloatingDrawdownSafe()
+bool SpreadCheck()
 {
-   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
-   double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+   double spread = SymbolInfoInteger(_Symbol,SYMBOL_SPREAD);
 
-   double dd=(balance-equity)/balance;
+   if(spread > MaxSpreadPoints)
+      return false;
 
-   if(dd>=FloatingDDLimit)
+   return true;
+}
+
+bool VolatilityCheck()
+{
+   CopyBuffer(atrHandle,0,0,2,atrBuffer);
+
+   if(atrBuffer[0] <= 0)
       return false;
 
    return true;
 }
 
 //+------------------------------------------------------------------+
+//| Signal Engine                                                    |
+//+------------------------------------------------------------------+
 
-int CountPositions(int type)
+int SignalEngine()
 {
-   int total=0;
+   CopyBuffer(rsiHandle,0,0,2,rsiBuffer);
+   CopyBuffer(emaFastHandle,0,0,2,emaFastBuffer);
+   CopyBuffer(emaSlowHandle,0,0,2,emaSlowBuffer);
 
-   for(int i=0;i<PositionsTotal();i++)
-   {
-      ulong ticket=PositionGetTicket(i);
+   if(rsiBuffer[0] > 55 && emaFastBuffer[0] > emaSlowBuffer[0])
+      return 1;
 
-      if(PositionSelectByTicket(ticket))
-      {
-         if(PositionGetString(POSITION_SYMBOL)==_Symbol &&
-            PositionGetInteger(POSITION_TYPE)==type)
-            total++;
-      }
-   }
+   if(rsiBuffer[0] < 45 && emaFastBuffer[0] < emaSlowBuffer[0])
+      return -1;
 
-   return total;
+   return 0;
 }
 
 //+------------------------------------------------------------------+
-
-double NormalizeLot(double lot)
-{
-   double minLot=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
-   double maxLot=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
-   double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
-
-   lot=MathMax(minLot,lot);
-   lot=MathMin(maxLot,lot);
-
-   lot=MathFloor(lot/step)*step;
-
-   return NormalizeDouble(lot,2);
-}
-
+//| Position Control                                                 |
 //+------------------------------------------------------------------+
 
-double GetLotSize(int depth,double atr)
+bool PositionTotalCheck()
 {
-   double lot=LotSize;
-
-   if(UseDynamicLot)
-   {
-      double balance=AccountInfoDouble(ACCOUNT_BALANCE);
-      double riskMoney=balance*(RiskPercent/100.0);
-
-      double tickValue=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
-      double safeATR=MathMax(atr,_Point*50);
-
-      lot=riskMoney/(safeATR*tickValue*10);
-
-      if(lot<LotSize) lot=LotSize;
-   }
-
-   lot = lot/(1+(depth*0.45));
-
-   return NormalizeLot(lot);
-}
-
-//+------------------------------------------------------------------+
-
-bool ExecuteTrade(int type,double lot,double sl,double tp)
-{
-   for(int i=0;i<RetryAttempts;i++)
-   {
-      ZeroMemory(request);
-      ZeroMemory(result);
-
-      request.action=TRADE_ACTION_DEAL;
-      request.symbol=_Symbol;
-      request.volume=lot;
-      request.deviation=MaxSlippage;
-
-      if(type==ORDER_TYPE_BUY)
-      {
-         request.type=ORDER_TYPE_BUY;
-         request.price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-      }
-      else
-      {
-         request.type=ORDER_TYPE_SELL;
-         request.price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-      }
-
-      request.sl=sl;
-      request.tp=tp;
-
-      bool sent = OrderSend(request,result);
-
-      if(sent && result.retcode==TRADE_RETCODE_DONE)
-         return true;
-
-      Print("Trade attempt failed. Retcode: ",result.retcode);
-   }
+   if(PositionsTotal() >= MaxOpenTrades)
+      return true;
 
    return false;
 }
 
 //+------------------------------------------------------------------+
+//| Risk Management                                                  |
+//+------------------------------------------------------------------+
 
-void CloseAll()
+double CalculateLot(double stoploss_points)
 {
-   for(int i=0;i<PositionsTotal();i++)
-   {
-      ulong ticket=PositionGetTicket(i);
+   if(!UseDynamicLot)
+      return FixedLot;
 
-      if(PositionSelectByTicket(ticket))
-      {
-         if(PositionGetString(POSITION_SYMBOL)==_Symbol)
-         {
-            ZeroMemory(request);
-            ZeroMemory(result);
+   double risk = AccountInfoDouble(ACCOUNT_BALANCE) * RiskPercent / 100.0;
 
-            request.action=TRADE_ACTION_DEAL;
-            request.position=ticket;
-            request.symbol=_Symbol;
-            request.volume=PositionGetDouble(POSITION_VOLUME);
-            request.deviation=MaxSlippage;
+   double tickvalue = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
 
-            if(PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)
-            {
-               request.type=ORDER_TYPE_SELL;
-               request.price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-            }
-            else
-            {
-               request.type=ORDER_TYPE_BUY;
-               request.price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-            }
+   double lot = risk / (stoploss_points * tickvalue);
 
-            bool sent = OrderSend(request,result);
-
-            if(!sent || result.retcode!=TRADE_RETCODE_DONE)
-               Print("Close failed. Retcode:",result.retcode);
-         }
-      }
-   }
-
-   buyGridActive=false;
-   sellGridActive=false;
+   return NormalizeDouble(lot,2);
 }
 
 //+------------------------------------------------------------------+
+//| Order Execution                                                  |
+//+------------------------------------------------------------------+
 
-void OnTick()
+void OpenBuy()
 {
-   if(!SymbolInfoTick(_Symbol,tick)) return;
+   CopyBuffer(atrHandle,0,0,2,atrBuffer);
 
-   if(!SpreadOK()) return;
+   double atr = atrBuffer[0];
 
-   if(!FloatingDrawdownSafe())
+   double sl = SymbolInfoDouble(_Symbol,SYMBOL_BID) - atr * SL_ATR_Multiplier;
+   double tp = SymbolInfoDouble(_Symbol,SYMBOL_BID) + atr * TP_ATR_Multiplier;
+
+   double sl_points = (SymbolInfoDouble(_Symbol,SYMBOL_BID)-sl)/_Point;
+
+   double lot = CalculateLot(sl_points);
+
+   trade.Buy(lot,_Symbol,0,sl,tp);
+}
+
+void OpenSell()
+{
+   CopyBuffer(atrHandle,0,0,2,atrBuffer);
+
+   double atr = atrBuffer[0];
+
+   double sl = SymbolInfoDouble(_Symbol,SYMBOL_ASK) + atr * SL_ATR_Multiplier;
+   double tp = SymbolInfoDouble(_Symbol,SYMBOL_ASK) - atr * TP_ATR_Multiplier;
+
+   double sl_points = (sl-SymbolInfoDouble(_Symbol,SYMBOL_ASK))/_Point;
+
+   double lot = CalculateLot(sl_points);
+
+   trade.Sell(lot,_Symbol,0,sl,tp);
+}
+
+//+------------------------------------------------------------------+
+//| Trade Manager                                                    |
+//+------------------------------------------------------------------+
+
+void TradeManager()
+{
+   for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      CloseAll();
-      return;
-   }
+      ulong ticket = PositionGetTicket(i);
 
-   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
-
-   if(equity<peakEquity*EquityProtection)
-      return;
-
-   if(equity>peakEquity)
-      peakEquity=equity;
-
-   if(TimeCurrent()-lastTradeTime < CooldownSeconds) return;
-
-   int totalPositions=PositionsTotal();
-   if(totalPositions>=MaxTotalPositions) return;
-
-   double rsi[2];
-   double atr[1];
-
-   if(CopyBuffer(rsiHandle,0,0,2,rsi)<=0) return;
-   if(CopyBuffer(atrHandle,0,0,1,atr)<=0) return;
-
-   double atrValue=atr[0];
-
-   if(rsi[1]<RSIBuyLevel && rsi[0]>RSIBuyLevel && !sellGridActive)
-   {
-      int depth=CountPositions(POSITION_TYPE_BUY);
-
-      if(depth<MaxBuyPositions)
+      if(PositionSelectByTicket(ticket))
       {
-         double lot=GetLotSize(depth,atrValue);
-
-         double sl=tick.ask-(atrValue*EmergencySL_ATR);
-         double tp=tick.ask+(atrValue*TP_ATR);
-
-         if(ExecuteTrade(ORDER_TYPE_BUY,lot,sl,tp))
-         {
-            lastBuyPrice=tick.ask;
-            buyGridActive=true;
-            lastTradeTime=TimeCurrent();
-         }
+         ManageBreakeven(ticket);
+         ManageTrailing(ticket);
       }
    }
+}
 
-   if(rsi[1]>RSISellLevel && rsi[0]<RSISellLevel && !buyGridActive)
+void ManageBreakeven(ulong ticket)
+{
+   double open = PositionGetDouble(POSITION_PRICE_OPEN);
+   double sl   = PositionGetDouble(POSITION_SL);
+   double profit = PositionGetDouble(POSITION_PROFIT);
+
+   if(profit > BreakevenTrigger)
    {
-      int depth=CountPositions(POSITION_TYPE_SELL);
-
-      if(depth<MaxSellPositions)
-      {
-         double lot=GetLotSize(depth,atrValue);
-
-         double sl=tick.bid+(atrValue*EmergencySL_ATR);
-         double tp=tick.bid-(atrValue*TP_ATR);
-
-         if(ExecuteTrade(ORDER_TYPE_SELL,lot,sl,tp))
-         {
-            lastSellPrice=tick.bid;
-            sellGridActive=true;
-            lastTradeTime=TimeCurrent();
-         }
-      }
+      trade.PositionModify(ticket,open,PositionGetDouble(POSITION_TP));
    }
+}
+
+void ManageTrailing(ulong ticket)
+{
+   double price = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+
+   double newSL = price - TrailingDistance * _Point;
+
+   trade.PositionModify(ticket,newSL,PositionGetDouble(POSITION_TP));
+}
+
+//+------------------------------------------------------------------+
+//| Equity Protection                                                |
+//+------------------------------------------------------------------+
+
+bool DrawdownProtection()
+{
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   double dd = (balance-equity)/balance*100;
+
+   if(dd > MaxDrawdownPercent)
+      return false;
+
+   return true;
 }
