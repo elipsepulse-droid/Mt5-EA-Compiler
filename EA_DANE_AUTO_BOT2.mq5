@@ -1,33 +1,34 @@
 //+------------------------------------------------------------------+
-//| XAUUSD_M1_PRO_SCALPER_STRUCTURE                                  |
-//| Modular EA Architecture                                          |
+//| EA_DANE_AUTO_BOT2_FIXED                                          |
+//| Clean compile version                                            |
 //+------------------------------------------------------------------+
 #property strict
+
 #include <Trade/Trade.mqh>
 
 CTrade trade;
 
 //================ INPUT PARAMETERS =================//
 
-input double FixedLot              = 0.01;
-input bool   UseDynamicLot         = true;
-input double RiskPercent           = 1.0;
+input double FixedLot = 0.01;
+input bool   UseDynamicLot = true;
+input double RiskPercent = 1.0;
 
-input int    RSIPeriod             = 14;
-input int    FastEMA               = 9;
-input int    SlowEMA               = 21;
+input int RSIPeriod = 14;
+input int FastEMA = 9;
+input int SlowEMA = 21;
 
-input int    ATRPeriod             = 14;
-input double SL_ATR_Multiplier     = 1.5;
-input double TP_ATR_Multiplier     = 1.0;
+input int ATRPeriod = 14;
+input double SL_ATR_Multiplier = 1.5;
+input double TP_ATR_Multiplier = 1.0;
 
-input double MaxSpreadPoints       = 300;
-input int    MaxOpenTrades         = 5;
+input double MaxSpreadPoints = 300;
+input int MaxOpenTrades = 5;
 
-input double BreakevenTrigger      = 200;
-input double TrailingDistance      = 150;
+input double BreakevenTrigger = 200;
+input double TrailingDistance = 150;
 
-input double MaxDrawdownPercent    = 20;
+input double MaxDrawdownPercent = 20;
 
 //================ GLOBAL VARIABLES =================//
 
@@ -52,6 +53,11 @@ int OnInit()
    emaSlowHandle = iMA(_Symbol,_Period,SlowEMA,0,MODE_EMA,PRICE_CLOSE);
    atrHandle = iATR(_Symbol,_Period,ATRPeriod);
 
+   ArraySetAsSeries(rsiBuffer,true);
+   ArraySetAsSeries(emaFastBuffer,true);
+   ArraySetAsSeries(emaSlowBuffer,true);
+   ArraySetAsSeries(atrBuffer,true);
+
    return(INIT_SUCCEEDED);
 }
 
@@ -61,13 +67,15 @@ int OnInit()
 
 void OnTick()
 {
-   if(!MarketConditionFilter()) return;
+   if(!MarketFilters())
+      return;
 
-   TradeManager();
+   ManagePositions();
 
-   if(PositionTotalCheck()) return;
+   if(PositionsTotal() >= MaxOpenTrades)
+      return;
 
-   int signal = SignalEngine();
+   int signal = GetSignal();
 
    if(signal == 1)
       OpenBuy();
@@ -80,18 +88,17 @@ void OnTick()
 //| Market Filters                                                   |
 //+------------------------------------------------------------------+
 
-bool MarketConditionFilter()
+bool MarketFilters()
 {
-   if(SpreadCheck()==false) return false;
-   if(VolatilityCheck()==false) return false;
-   if(DrawdownProtection()==false) return false;
+   if(!SpreadCheck()) return false;
+   if(!DrawdownCheck()) return false;
 
    return true;
 }
 
 bool SpreadCheck()
 {
-   double spread = SymbolInfoInteger(_Symbol,SYMBOL_SPREAD);
+   double spread = (double)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD);
 
    if(spread > MaxSpreadPoints)
       return false;
@@ -99,11 +106,14 @@ bool SpreadCheck()
    return true;
 }
 
-bool VolatilityCheck()
+bool DrawdownCheck()
 {
-   CopyBuffer(atrHandle,0,0,2,atrBuffer);
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
 
-   if(atrBuffer[0] <= 0)
+   double dd = (balance-equity)/balance*100.0;
+
+   if(dd > MaxDrawdownPercent)
       return false;
 
    return true;
@@ -113,7 +123,7 @@ bool VolatilityCheck()
 //| Signal Engine                                                    |
 //+------------------------------------------------------------------+
 
-int SignalEngine()
+int GetSignal()
 {
    CopyBuffer(rsiHandle,0,0,2,rsiBuffer);
    CopyBuffer(emaFastHandle,0,0,2,emaFastBuffer);
@@ -129,22 +139,10 @@ int SignalEngine()
 }
 
 //+------------------------------------------------------------------+
-//| Position Control                                                 |
-//+------------------------------------------------------------------+
-
-bool PositionTotalCheck()
-{
-   if(PositionsTotal() >= MaxOpenTrades)
-      return true;
-
-   return false;
-}
-
-//+------------------------------------------------------------------+
 //| Risk Management                                                  |
 //+------------------------------------------------------------------+
 
-double CalculateLot(double stoploss_points)
+double CalculateLot(double sl_points)
 {
    if(!UseDynamicLot)
       return FixedLot;
@@ -153,7 +151,13 @@ double CalculateLot(double stoploss_points)
 
    double tickvalue = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
 
-   double lot = risk / (stoploss_points * tickvalue);
+   double lot = risk / (sl_points * tickvalue);
+
+   double minlot = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double maxlot = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+
+   if(lot < minlot) lot = minlot;
+   if(lot > maxlot) lot = maxlot;
 
    return NormalizeDouble(lot,2);
 }
@@ -164,88 +168,91 @@ double CalculateLot(double stoploss_points)
 
 void OpenBuy()
 {
-   CopyBuffer(atrHandle,0,0,2,atrBuffer);
+   CopyBuffer(atrHandle,0,0,1,atrBuffer);
 
    double atr = atrBuffer[0];
 
-   double sl = SymbolInfoDouble(_Symbol,SYMBOL_BID) - atr * SL_ATR_Multiplier;
-   double tp = SymbolInfoDouble(_Symbol,SYMBOL_BID) + atr * TP_ATR_Multiplier;
+   double price = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
 
-   double sl_points = (SymbolInfoDouble(_Symbol,SYMBOL_BID)-sl)/_Point;
+   double sl = price - atr * SL_ATR_Multiplier;
+   double tp = price + atr * TP_ATR_Multiplier;
+
+   double sl_points = (price - sl)/_Point;
 
    double lot = CalculateLot(sl_points);
 
-   trade.Buy(lot,_Symbol,0,sl,tp);
+   trade.Buy(lot,_Symbol,price,sl,tp);
 }
 
 void OpenSell()
 {
-   CopyBuffer(atrHandle,0,0,2,atrBuffer);
+   CopyBuffer(atrHandle,0,0,1,atrBuffer);
 
    double atr = atrBuffer[0];
 
-   double sl = SymbolInfoDouble(_Symbol,SYMBOL_ASK) + atr * SL_ATR_Multiplier;
-   double tp = SymbolInfoDouble(_Symbol,SYMBOL_ASK) - atr * TP_ATR_Multiplier;
+   double price = SymbolInfoDouble(_Symbol,SYMBOL_BID);
 
-   double sl_points = (sl-SymbolInfoDouble(_Symbol,SYMBOL_ASK))/_Point;
+   double sl = price + atr * SL_ATR_Multiplier;
+   double tp = price - atr * TP_ATR_Multiplier;
+
+   double sl_points = (sl - price)/_Point;
 
    double lot = CalculateLot(sl_points);
 
-   trade.Sell(lot,_Symbol,0,sl,tp);
+   trade.Sell(lot,_Symbol,price,sl,tp);
 }
 
 //+------------------------------------------------------------------+
-//| Trade Manager                                                    |
+//| Position Management                                              |
 //+------------------------------------------------------------------+
 
-void TradeManager()
+void ManagePositions()
 {
    for(int i=PositionsTotal()-1;i>=0;i--)
    {
       ulong ticket = PositionGetTicket(i);
 
-      if(PositionSelectByTicket(ticket))
-      {
-         ManageBreakeven(ticket);
-         ManageTrailing(ticket);
-      }
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      ManageBreakeven(ticket);
+      ManageTrailing(ticket);
    }
 }
+
+//+------------------------------------------------------------------+
+//| Breakeven                                                        |
+//+------------------------------------------------------------------+
 
 void ManageBreakeven(ulong ticket)
 {
+   if(!PositionSelectByTicket(ticket))
+      return;
+
    double open = PositionGetDouble(POSITION_PRICE_OPEN);
    double sl   = PositionGetDouble(POSITION_SL);
+   double tp   = PositionGetDouble(POSITION_TP);
    double profit = PositionGetDouble(POSITION_PROFIT);
 
-   if(profit > BreakevenTrigger)
-   {
-      trade.PositionModify(ticket,open,PositionGetDouble(POSITION_TP));
-   }
+   if(profit > BreakevenTrigger && sl != open)
+      trade.PositionModify(ticket,open,tp);
 }
+
+//+------------------------------------------------------------------+
+//| Trailing Stop                                                    |
+//+------------------------------------------------------------------+
 
 void ManageTrailing(ulong ticket)
 {
+   if(!PositionSelectByTicket(ticket))
+      return;
+
    double price = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double sl = PositionGetDouble(POSITION_SL);
+   double tp = PositionGetDouble(POSITION_TP);
 
    double newSL = price - TrailingDistance * _Point;
 
-   trade.PositionModify(ticket,newSL,PositionGetDouble(POSITION_TP));
-}
-
-//+------------------------------------------------------------------+
-//| Equity Protection                                                |
-//+------------------------------------------------------------------+
-
-bool DrawdownProtection()
-{
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
-
-   double dd = (balance-equity)/balance*100;
-
-   if(dd > MaxDrawdownPercent)
-      return false;
-
-   return true;
+   if(newSL > sl)
+      trade.PositionModify(ticket,newSL,tp);
 }
