@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
-//| EA_DANE_AUTO_BOT12 - Stability + Risk Optimized Grid EA          |
+//| EA_DANE_AUTO_BOT13 - Advanced Stability Gold Scalper             |
+//| Architecture preserved from BOT12                                |
+//| Added professional risk and execution improvements               |
 //| Compatible with MT5                                              |
-//| Structure preserved with advanced safety improvements            |
 //+------------------------------------------------------------------+
 #property strict
-
 #include <Trade/Trade.mqh>
 CTrade trade;
 
@@ -34,10 +34,7 @@ input double ATRMultiplier = 2.0;
 
 input int MaxSpreadPoints = 50;
 
-input double EquityStopPercent = 0.7;
 input double FloatingDDLimit = 0.03;
-
-input double BasketProfitSpacing = 5.0;
 
 input int MaxTotalPositions = 15;
 input int MaxBuyPositions = 10;
@@ -49,9 +46,15 @@ input int MaxSlippage = 20;
 input double MarginExposureLimit = 0.35;
 input double ExposureHardCap = 0.002;
 
-input double VolatilityFloorFactor = 0.6;
-
 input int RetryAttempts = 3;
+
+//---- Professional additions
+input double EmergencySL_ATR = 6.0;
+input double TP_ATR = 1.5;
+input int MaxTradeSeconds = 900;
+input double SpreadSpikeMultiplier = 2.5;
+input double TickVolatilityATR = 0.4;
+input double EquityProtection = 0.92;
 
 //---- Indicator handles
 int rsiHandle;
@@ -66,6 +69,8 @@ int fastMA_HTF;
 //---- Variables
 double pip;
 double gridSpacing;
+double smoothedATR=0;
+double atrLongAvg=0;
 
 double lastBuyPrice=0;
 double lastSellPrice=0;
@@ -74,17 +79,12 @@ bool buyGridActive=false;
 bool sellGridActive=false;
 
 datetime lastTradeTime=0;
-
 double peakEquity=0;
-
-double smoothedATR=0;
-double atrLongAvg=0;
-
-double basketLockProfit=0;
+double avgSpread=0;
 
 MqlTick tick;
 
-//------------------------------------------------//
+//+------------------------------------------------------------------+
 
 int OnInit()
 {
@@ -110,12 +110,11 @@ int OnInit()
    return(INIT_SUCCEEDED);
 }
 
-//------------------------------------------------//
+//+------------------------------------------------------------------+
 
 bool UpdateIndicators(double &rsiPrev,double &rsiCur,
                       double &fastMA,double &slowMA,
-                      double &adx,double &atr,
-                      double &fastHTF)
+                      double &adx,double &atr,double &fastHTF)
 {
    double buf[3];
 
@@ -141,7 +140,7 @@ bool UpdateIndicators(double &rsiPrev,double &rsiCur,
    return true;
 }
 
-//------------------------------------------------//
+//+------------------------------------------------------------------+
 
 double NormalizeLot(double lot)
 {
@@ -157,7 +156,7 @@ double NormalizeLot(double lot)
    return NormalizeDouble(lot,2);
 }
 
-//------------------------------------------------//
+//+------------------------------------------------------------------+
 
 double GetLotSize(int depth,double atr)
 {
@@ -169,24 +168,19 @@ double GetLotSize(int depth,double atr)
       double riskMoney=balance*(RiskPercent/100.0);
 
       double tickValue=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
-
       double safeATR=MathMax(atr,_Point*50);
 
       lot=riskMoney/(safeATR*tickValue*10);
 
       if(lot<LotSize) lot=LotSize;
-
-      double maxLotRisk=balance*0.001;
-
-      lot=MathMin(lot,maxLotRisk);
    }
 
-   lot=lot*MathPow(0.85,depth);
+   lot=lot/(1+(depth*0.6));
 
    return NormalizeLot(lot);
 }
 
-//------------------------------------------------//
+//+------------------------------------------------------------------+
 
 int CountPositions(int type)
 {
@@ -205,7 +199,7 @@ int CountPositions(int type)
    return total;
 }
 
-//------------------------------------------------//
+//+------------------------------------------------------------------+
 
 double TotalExposure()
 {
@@ -223,25 +217,7 @@ double TotalExposure()
    return exposure;
 }
 
-//------------------------------------------------//
-
-double BasketProfit()
-{
-   double profit=0;
-
-   for(int i=PositionsTotal()-1;i>=0;i--)
-   {
-      if(PositionSelectByIndex(i))
-      {
-         if(PositionGetString(POSITION_SYMBOL)==_Symbol)
-            profit+=PositionGetDouble(POSITION_PROFIT);
-      }
-   }
-
-   return profit;
-}
-
-//------------------------------------------------//
+//+------------------------------------------------------------------+
 
 void CloseAll()
 {
@@ -259,10 +235,9 @@ void CloseAll()
 
    buyGridActive=false;
    sellGridActive=false;
-   basketLockProfit=0;
 }
 
-//------------------------------------------------//
+//+------------------------------------------------------------------+
 
 bool FloatingDrawdownSafe()
 {
@@ -277,21 +252,22 @@ bool FloatingDrawdownSafe()
    return true;
 }
 
-//------------------------------------------------//
+//+------------------------------------------------------------------+
 
 bool SpreadOK(double atr)
 {
    double spread=(SymbolInfoDouble(_Symbol,SYMBOL_ASK)-
                   SymbolInfoDouble(_Symbol,SYMBOL_BID))/_Point;
 
-   if(spread>MaxSpreadPoints) return false;
+   avgSpread=(avgSpread*0.9)+(spread*0.1);
 
-   if(spread>atr/_Point*0.25) return false;
+   if(spread>MaxSpreadPoints) return false;
+   if(spread>avgSpread*SpreadSpikeMultiplier) return false;
 
    return true;
 }
 
-//------------------------------------------------//
+//+------------------------------------------------------------------+
 
 bool MarginSafe()
 {
@@ -304,64 +280,50 @@ bool MarginSafe()
    return true;
 }
 
-//------------------------------------------------//
+//+------------------------------------------------------------------+
 
-bool ExecuteBuy(double lot,double tp)
+bool ExecuteBuy(double lot,double sl,double tp)
 {
    for(int i=0;i<RetryAttempts;i++)
    {
-      if(trade.Buy(lot,_Symbol,0,0,tp))
+      if(trade.Buy(lot,_Symbol,0,sl,tp))
          return true;
    }
    return false;
 }
 
-bool ExecuteSell(double lot,double tp)
+bool ExecuteSell(double lot,double sl,double tp)
 {
    for(int i=0;i<RetryAttempts;i++)
    {
-      if(trade.Sell(lot,_Symbol,0,0,tp))
+      if(trade.Sell(lot,_Symbol,0,sl,tp))
          return true;
    }
    return false;
 }
 
-//------------------------------------------------//
+//+------------------------------------------------------------------+
 
-void ManageBasket()
+void ManagePositions()
 {
-   double profit=BasketProfit();
-   double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      if(PositionSelectByIndex(i))
+      {
+         if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
 
-   if(profit>balance*0.01)
-      basketLockProfit=profit*0.5;
+         datetime openTime=(datetime)PositionGetInteger(POSITION_TIME);
 
-   if(basketLockProfit>0 && profit<basketLockProfit)
-      CloseAll();
-
-   double target=TotalExposure()*smoothedATR*1.5;
-
-   if(profit>=target)
-      CloseAll();
+         if(TimeCurrent()-openTime > MaxTradeSeconds)
+         {
+            ulong ticket=PositionGetInteger(POSITION_TICKET);
+            trade.PositionClose(ticket);
+         }
+      }
+   }
 }
 
-//------------------------------------------------//
-
-void CheckExitSignal()
-{
-   double fast[2],slow[2];
-
-   if(CopyBuffer(exitFastHandle,0,0,2,fast)<=0) return;
-   if(CopyBuffer(exitSlowHandle,0,0,2,slow)<=0) return;
-
-   bool crossUp=fast[1]<slow[1] && fast[0]>slow[0];
-   bool crossDown=fast[1]>slow[1] && fast[0]<slow[0];
-
-   if(crossUp || crossDown)
-      CloseAll();
-}
-
-//------------------------------------------------//
+//+------------------------------------------------------------------+
 
 void OnTick()
 {
@@ -373,7 +335,6 @@ void OnTick()
       return;
 
    if(!SpreadOK(atr)) return;
-
    if(!MarginSafe()) return;
 
    if(!FloatingDrawdownSafe())
@@ -382,33 +343,33 @@ void OnTick()
       return;
    }
 
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   if(equity<peakEquity*EquityProtection)
+      return;
+
+   if(equity>peakEquity) peakEquity=equity;
+
    if(smoothedATR==0) smoothedATR=atr;
    if(atrLongAvg==0) atrLongAvg=atr;
 
    smoothedATR=(smoothedATR*0.8)+(atr*0.2);
    atrLongAvg=(atrLongAvg*0.95)+(atr*0.05);
 
-   if(atr<atrLongAvg*VolatilityFloorFactor)
-      return;
+   if(atr>atrLongAvg*3) return;
 
    gridSpacing=(GridSpacingPips*pip)+(smoothedATR*ATRMultiplier);
 
-   double volSpike=atr/atrLongAvg;
-   gridSpacing*=1+MathPow(volSpike,2);
+   double tickMove=MathAbs(tick.bid-lastBuyPrice);
+   if(tickMove>atr*TickVolatilityATR) return;
 
    bool uptrend=fastMA>slowMA && tick.bid>fastHTF;
    bool downtrend=fastMA<slowMA && tick.bid<fastHTF;
-
-   double rsiSlope=rsiCur-rsiPrev;
-
-   if(MathAbs(rsiSlope)<0.2) return;
 
    if(TimeCurrent()-lastTradeTime<CooldownSeconds) return;
 
    if(adx<MinADX) return;
 
    int totalPositions=PositionsTotal();
-
    if(totalPositions>=MaxTotalPositions) return;
 
    double exposure=TotalExposure();
@@ -416,6 +377,9 @@ void OnTick()
 
    if(exposure>balance*ExposureHardCap)
       return;
+
+   double rsiSlope=rsiCur-rsiPrev;
+   if(MathAbs(rsiSlope)<0.2) return;
 
    // BUY ENTRY
    if(rsiPrev<RSIBuyLevel && rsiCur>RSIBuyLevel && uptrend && !sellGridActive)
@@ -425,9 +389,11 @@ void OnTick()
       if(depth<MaxBuyPositions)
       {
          double lot=GetLotSize(depth,atr);
-         double tp=tick.ask+gridSpacing;
 
-         if(ExecuteBuy(lot,tp))
+         double sl=tick.ask-(atr*EmergencySL_ATR);
+         double tp=tick.ask+(atr*TP_ATR);
+
+         if(ExecuteBuy(lot,sl,tp))
          {
             lastBuyPrice=tick.ask;
             buyGridActive=true;
@@ -444,9 +410,11 @@ void OnTick()
       if(depth<MaxSellPositions)
       {
          double lot=GetLotSize(depth,atr);
-         double tp=tick.bid-gridSpacing;
 
-         if(ExecuteSell(lot,tp))
+         double sl=tick.bid+(atr*EmergencySL_ATR);
+         double tp=tick.bid-(atr*TP_ATR);
+
+         if(ExecuteSell(lot,sl,tp))
          {
             lastSellPrice=tick.bid;
             sellGridActive=true;
@@ -455,6 +423,5 @@ void OnTick()
       }
    }
 
-   ManageBasket();
-   CheckExitSignal();
+   ManagePositions();
 }
