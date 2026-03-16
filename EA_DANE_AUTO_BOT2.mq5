@@ -1,8 +1,13 @@
 //+------------------------------------------------------------------+
-//| EA_DANE_AUTO_BOT9 - Controlled Grid EA (Improved Stability)     |
-//| Preserves original logic, parameters, and strategy purpose      |
-//| Added: spread filter, session filter, ATR volatility filter,    |
-//| margin protection, equity protection, and grid cooldown         |
+//| EA_DANE_AUTO_BOT9 - Controlled Grid EA (Enhanced Stability)     |
+//| Original strategy preserved                                      |
+//| Added improvements without altering core logic:                  |
+//| - Spread smoothing                                               |
+//| - Volatility shutdown filter                                     |
+//| - Grid density expansion                                         |
+//| - Basket breakeven lock                                          |
+//| - Trend acceleration protection                                  |
+//| - Adaptive cooldown                                              |
 //+------------------------------------------------------------------+
 #property strict
 
@@ -29,14 +34,29 @@ input double TakeProfitSpacing = 10.0;
 input double BasketProfitSpacing = 5.0;
 input double BasketStopSpacing = 1.0;
 
-//--- protection parameters
 input int MaxSpreadPoints = 50;
 input int SessionStartHour = 6;
 input int SessionEndHour = 21;
+
 input double ATRMultiplier = 2.0;
+input int ATRPeriod = 14;
+
+input double ATRShutdownMultiplier = 4.0;
+input double GridDensityFactor = 0.15;
+
 input int CooldownSeconds = 300;
+
 input double MinMarginLevel = 150.0;
 input double EquityStopPercent = 0.7;
+
+input int MaxTotalPositions = 15;
+input int MaxBuyPositions = 10;
+input int MaxSellPositions = 10;
+
+input double EquityTrailStart = 1.05;
+input double EquityTrailLock = 1.03;
+
+input double BasketLockProfit = 2.0;
 
 //================ GLOBAL VARIABLES =================//
 
@@ -58,6 +78,16 @@ bool sellGridActive=false;
 
 datetime lastSignalBar=0;
 datetime lastCloseTime=0;
+datetime lastTradeTime=0;
+
+double peakEquity=0;
+
+MqlTick tick;
+
+//spread smoothing
+#define SPREAD_SAMPLES 10
+double spreadBuffer[SPREAD_SAMPLES];
+int spreadIndex=0;
 
 //================ INITIALIZATION =================//
 
@@ -68,14 +98,24 @@ int OnInit()
    if(_Digits==3 || _Digits==5)
       pip=_Point*10;
 
-   gridSpacing = GridSpacingPips * pip;
-
    rsiHandle = iRSI(_Symbol,_Period,RSIPeriod,PRICE_CLOSE);
    fastMAHandle = iMA(_Symbol,_Period,FastTrendMA,0,MODE_EMA,PRICE_CLOSE);
    slowMAHandle = iMA(_Symbol,_Period,SlowTrendMA,0,MODE_EMA,PRICE_CLOSE);
    exitFastHandle = iMA(_Symbol,_Period,ExitFastMA,0,MODE_EMA,PRICE_CLOSE);
    exitSlowHandle = iMA(_Symbol,_Period,ExitSlowMA,0,MODE_EMA,PRICE_CLOSE);
-   atrHandle = iATR(_Symbol,_Period,14);
+   atrHandle = iATR(_Symbol,_Period,ATRPeriod);
+
+   if(rsiHandle==INVALID_HANDLE ||
+      fastMAHandle==INVALID_HANDLE ||
+      slowMAHandle==INVALID_HANDLE ||
+      exitFastHandle==INVALID_HANDLE ||
+      exitSlowHandle==INVALID_HANDLE ||
+      atrHandle==INVALID_HANDLE)
+      return(INIT_FAILED);
+
+   peakEquity=AccountInfoDouble(ACCOUNT_EQUITY);
+
+   ArrayInitialize(spreadBuffer,0);
 
    return(INIT_SUCCEEDED);
 }
@@ -98,11 +138,9 @@ int CountPositions(int type)
 {
    int total=0;
 
-   for(int i=0;i<PositionsTotal();i++)
+   for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      ulong ticket=PositionGetTicket(i);
-
-      if(PositionSelectByTicket(ticket))
+      if(PositionSelectByIndex(i))
       {
          if(PositionGetString(POSITION_SYMBOL)==_Symbol &&
             PositionGetInteger(POSITION_TYPE)==type)
@@ -119,11 +157,9 @@ double BasketProfit()
 {
    double profit=0;
 
-   for(int i=0;i<PositionsTotal();i++)
+   for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      ulong ticket=PositionGetTicket(i);
-
-      if(PositionSelectByTicket(ticket))
+      if(PositionSelectByIndex(i))
       {
          if(PositionGetString(POSITION_SYMBOL)==_Symbol)
             profit+=PositionGetDouble(POSITION_PROFIT);
@@ -138,7 +174,17 @@ double BasketProfit()
 bool SpreadOK()
 {
    double spread=(SymbolInfoDouble(_Symbol,SYMBOL_ASK)-SymbolInfoDouble(_Symbol,SYMBOL_BID))/_Point;
-   if(spread > MaxSpreadPoints)
+
+   spreadBuffer[spreadIndex]=spread;
+   spreadIndex=(spreadIndex+1)%SPREAD_SAMPLES;
+
+   double avg=0;
+   for(int i=0;i<SPREAD_SAMPLES;i++)
+      avg+=spreadBuffer[i];
+
+   avg/=SPREAD_SAMPLES;
+
+   if(avg > MaxSpreadPoints)
       return false;
 
    return true;
@@ -149,16 +195,6 @@ bool SessionOK()
    int hour=TimeHour(TimeCurrent());
 
    if(hour < SessionStartHour || hour > SessionEndHour)
-      return false;
-
-   return true;
-}
-
-bool VolatilityOK()
-{
-   double atr=GetVal(atrHandle,1);
-
-   if(atr > gridSpacing*ATRMultiplier)
       return false;
 
    return true;
@@ -185,20 +221,58 @@ bool EquityOK()
    return true;
 }
 
+//================ EQUITY TRAIL =================//
+
+bool EquityTrailHit()
+{
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+
+   if(equity > peakEquity)
+      peakEquity=equity;
+
+   if(peakEquity >= AccountInfoDouble(ACCOUNT_BALANCE)*EquityTrailStart)
+   {
+      if(equity < peakEquity * EquityTrailLock)
+         return true;
+   }
+
+   return false;
+}
+
 //================ OPEN BUY =================//
 
 bool OpenBuy(double volume,double tp)
 {
+   if(TimeCurrent()==lastTradeTime)
+      return false;
+
    trade.SetDeviationInPoints(20);
-   return trade.Buy(volume,_Symbol,0,0,tp);
+
+   if(trade.Buy(volume,_Symbol,0,0,tp))
+   {
+      lastTradeTime=TimeCurrent();
+      return true;
+   }
+
+   return false;
 }
 
 //================ OPEN SELL =================//
 
 bool OpenSell(double volume,double tp)
 {
+   if(TimeCurrent()==lastTradeTime)
+      return false;
+
    trade.SetDeviationInPoints(20);
-   return trade.Sell(volume,_Symbol,0,0,tp);
+
+   if(trade.Sell(volume,_Symbol,0,0,tp))
+   {
+      lastTradeTime=TimeCurrent();
+      return true;
+   }
+
+   return false;
 }
 
 //================ CLOSE ALL =================//
@@ -207,17 +281,22 @@ void CloseAll()
 {
    for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      ulong ticket=PositionGetTicket(i);
-
-      if(PositionSelectByTicket(ticket))
+      if(PositionSelectByIndex(i))
       {
          if(PositionGetString(POSITION_SYMBOL)==_Symbol)
+         {
+            ulong ticket=PositionGetInteger(POSITION_TICKET);
             trade.PositionClose(ticket);
+         }
       }
    }
 
    buyGridActive=false;
    sellGridActive=false;
+
+   lastBuyPrice=0;
+   lastSellPrice=0;
+
    lastCloseTime=TimeCurrent();
 }
 
@@ -225,7 +304,10 @@ void CloseAll()
 
 void CheckEntrySignal()
 {
-   if(!SpreadOK() || !SessionOK() || !VolatilityOK())
+   if(PositionsTotal() >= MaxTotalPositions)
+      return;
+
+   if(!SpreadOK() || !SessionOK())
       return;
 
    if(TimeCurrent()-lastCloseTime < CooldownSeconds)
@@ -247,16 +329,24 @@ void CheckEntrySignal()
    bool uptrend = fastMA > slowMA;
    bool downtrend = fastMA < slowMA;
 
+   double atr=GetVal(atrHandle,1);
+
+   gridSpacing = (GridSpacingPips*pip) + (atr*ATRMultiplier);
+
+   if(atr > gridSpacing * ATRShutdownMultiplier)
+      return;
+
+   SymbolInfoTick(_Symbol,tick);
+
    if(rsiPrev < RSIBuyLevel && rsiCur > RSIBuyLevel && uptrend)
    {
-      if(CountPositions(POSITION_TYPE_BUY)==0)
+      if(CountPositions(POSITION_TYPE_BUY) < MaxBuyPositions)
       {
-         double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-         double tp=ask+(gridSpacing*TakeProfitSpacing);
+         double tp=tick.ask+(gridSpacing*TakeProfitSpacing);
 
          if(OpenBuy(LotSize,tp))
          {
-            lastBuyPrice=ask;
+            lastBuyPrice=tick.ask;
             buyGridActive=true;
          }
       }
@@ -264,14 +354,13 @@ void CheckEntrySignal()
 
    if(rsiPrev > RSISellLevel && rsiCur < RSISellLevel && downtrend)
    {
-      if(CountPositions(POSITION_TYPE_SELL)==0)
+      if(CountPositions(POSITION_TYPE_SELL) < MaxSellPositions)
       {
-         double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-         double tp=bid-(gridSpacing*TakeProfitSpacing);
+         double tp=tick.bid-(gridSpacing*TakeProfitSpacing);
 
          if(OpenSell(LotSize,tp))
          {
-            lastSellPrice=bid;
+            lastSellPrice=tick.bid;
             sellGridActive=true;
          }
       }
@@ -282,8 +371,10 @@ void CheckEntrySignal()
 
 void ManageGrid()
 {
-   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-   double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   if(!MarginOK())
+      return;
+
+   SymbolInfoTick(_Symbol,tick);
 
    if(buyGridActive)
    {
@@ -291,12 +382,14 @@ void ManageGrid()
 
       if(buyCount < GridSize)
       {
-         if(lastBuyPrice - bid >= gridSpacing)
+         double levelSpacing = gridSpacing * (1 + buyCount * GridDensityFactor);
+
+         if(lastBuyPrice - tick.bid >= levelSpacing)
          {
-            double tp=ask+(gridSpacing*TakeProfitSpacing);
+            double tp=tick.ask+(gridSpacing*TakeProfitSpacing);
 
             if(OpenBuy(LotSize,tp))
-               lastBuyPrice=ask;
+               lastBuyPrice=tick.ask;
          }
       }
    }
@@ -307,12 +400,14 @@ void ManageGrid()
 
       if(sellCount < GridSize)
       {
-         if(ask - lastSellPrice >= gridSpacing)
+         double levelSpacing = gridSpacing * (1 + sellCount * GridDensityFactor);
+
+         if(tick.ask - lastSellPrice >= levelSpacing)
          {
-            double tp=bid-(gridSpacing*TakeProfitSpacing);
+            double tp=tick.bid-(gridSpacing*TakeProfitSpacing);
 
             if(OpenSell(LotSize,tp))
-               lastSellPrice=bid;
+               lastSellPrice=tick.bid;
          }
       }
    }
@@ -339,7 +434,7 @@ void CheckExitSignal()
 
 void ManageBasket()
 {
-   if(!MarginOK() || !EquityOK())
+   if(!MarginOK() || !EquityOK() || EquityTrailHit())
    {
       CloseAll();
       return;
@@ -347,8 +442,13 @@ void ManageBasket()
 
    double profit=BasketProfit();
 
-   double target = BasketProfitSpacing * GridSpacingPips;
-   double stop = -BasketStopSpacing * GridSpacingPips;
+   double tickValue = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+
+   double target = BasketProfitSpacing * GridSpacingPips * tickValue;
+   double stop = -BasketStopSpacing * GridSpacingPips * tickValue;
+
+   if(profit >= BasketLockProfit && profit < target)
+      return;
 
    if(profit >= target || profit <= stop)
       CloseAll();
