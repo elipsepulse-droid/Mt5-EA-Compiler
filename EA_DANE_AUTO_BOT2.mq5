@@ -1,18 +1,19 @@
 //+------------------------------------------------------------------+
-//| EA_DANE_AUTO_BOT4 - Volume Aggregation Grid EA                   |
-//| Signals compiled into larger trades                              |
-//| Grid also uses compiled volume to avoid micro trades             |
-//| Warning-free version                                             |
+//| EA_DANE_AUTO_BOT9 - Controlled Grid EA (Improved Stability)     |
+//| Preserves original logic, parameters, and strategy purpose      |
+//| Added: spread filter, session filter, ATR volatility filter,    |
+//| margin protection, equity protection, and grid cooldown         |
 //+------------------------------------------------------------------+
 #property strict
+
+#include <Trade/Trade.mqh>
+CTrade trade;
 
 //================ INPUT PARAMETERS =================//
 
 input double LotSize = 0.01;
 input int GridSize = 10;
 input int GridSpacingPips = 500;
-
-input int CompileSignals = 5;
 
 input int RSIPeriod = 14;
 input double RSIBuyLevel = 40;
@@ -28,6 +29,15 @@ input double TakeProfitSpacing = 10.0;
 input double BasketProfitSpacing = 5.0;
 input double BasketStopSpacing = 1.0;
 
+//--- protection parameters
+input int MaxSpreadPoints = 50;
+input int SessionStartHour = 6;
+input int SessionEndHour = 21;
+input double ATRMultiplier = 2.0;
+input int CooldownSeconds = 300;
+input double MinMarginLevel = 150.0;
+input double EquityStopPercent = 0.7;
+
 //================ GLOBAL VARIABLES =================//
 
 int rsiHandle;
@@ -35,6 +45,7 @@ int fastMAHandle;
 int slowMAHandle;
 int exitFastHandle;
 int exitSlowHandle;
+int atrHandle;
 
 double pip;
 double gridSpacing;
@@ -46,12 +57,7 @@ bool buyGridActive=false;
 bool sellGridActive=false;
 
 datetime lastSignalBar=0;
-
-int BuySignalCounter=0;
-int SellSignalCounter=0;
-
-int buyGridLevel=0;
-int sellGridLevel=0;
+datetime lastCloseTime=0;
 
 //================ INITIALIZATION =================//
 
@@ -67,14 +73,14 @@ int OnInit()
    rsiHandle = iRSI(_Symbol,_Period,RSIPeriod,PRICE_CLOSE);
    fastMAHandle = iMA(_Symbol,_Period,FastTrendMA,0,MODE_EMA,PRICE_CLOSE);
    slowMAHandle = iMA(_Symbol,_Period,SlowTrendMA,0,MODE_EMA,PRICE_CLOSE);
-
    exitFastHandle = iMA(_Symbol,_Period,ExitFastMA,0,MODE_EMA,PRICE_CLOSE);
    exitSlowHandle = iMA(_Symbol,_Period,ExitSlowMA,0,MODE_EMA,PRICE_CLOSE);
+   atrHandle = iATR(_Symbol,_Period,14);
 
    return(INIT_SUCCEEDED);
 }
 
-//================ BUFFER READ =================//
+//================ INDICATOR READ =================//
 
 double GetVal(int handle,int shift)
 {
@@ -127,102 +133,72 @@ double BasketProfit()
    return profit;
 }
 
-//================ BUY ORDER =================//
+//================ PROTECTION FILTERS =================//
+
+bool SpreadOK()
+{
+   double spread=(SymbolInfoDouble(_Symbol,SYMBOL_ASK)-SymbolInfoDouble(_Symbol,SYMBOL_BID))/_Point;
+   if(spread > MaxSpreadPoints)
+      return false;
+
+   return true;
+}
+
+bool SessionOK()
+{
+   int hour=TimeHour(TimeCurrent());
+
+   if(hour < SessionStartHour || hour > SessionEndHour)
+      return false;
+
+   return true;
+}
+
+bool VolatilityOK()
+{
+   double atr=GetVal(atrHandle,1);
+
+   if(atr > gridSpacing*ATRMultiplier)
+      return false;
+
+   return true;
+}
+
+bool MarginOK()
+{
+   double margin=AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+
+   if(margin < MinMarginLevel)
+      return false;
+
+   return true;
+}
+
+bool EquityOK()
+{
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+
+   if(equity < balance * EquityStopPercent)
+      return false;
+
+   return true;
+}
+
+//================ OPEN BUY =================//
 
 bool OpenBuy(double volume,double tp)
 {
-   MqlTradeRequest req;
-   MqlTradeResult res;
-
-   ZeroMemory(req);
-   ZeroMemory(res);
-
-   req.action=TRADE_ACTION_DEAL;
-   req.symbol=_Symbol;
-   req.volume=volume;
-   req.type=ORDER_TYPE_BUY;
-   req.price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-   req.tp=tp;
-   req.deviation=20;
-   req.magic=20260314;
-
-   bool sent = OrderSend(req,res);
-
-   if(!sent || res.retcode!=10009)
-   {
-      Print("BUY failed retcode: ",res.retcode);
-      return false;
-   }
-
-   return true;
+   trade.SetDeviationInPoints(20);
+   return trade.Buy(volume,_Symbol,0,0,tp);
 }
 
-//================ SELL ORDER =================//
+//================ OPEN SELL =================//
 
 bool OpenSell(double volume,double tp)
 {
-   MqlTradeRequest req;
-   MqlTradeResult res;
-
-   ZeroMemory(req);
-   ZeroMemory(res);
-
-   req.action=TRADE_ACTION_DEAL;
-   req.symbol=_Symbol;
-   req.volume=volume;
-   req.type=ORDER_TYPE_SELL;
-   req.price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-   req.tp=tp;
-   req.deviation=20;
-   req.magic=20260314;
-
-   bool sent = OrderSend(req,res);
-
-   if(!sent || res.retcode!=10009)
-   {
-      Print("SELL failed retcode: ",res.retcode);
-      return false;
-   }
-
-   return true;
-}
-
-//================ CLOSE POSITION =================//
-
-void ClosePosition(ulong ticket)
-{
-   if(!PositionSelectByTicket(ticket))
-      return;
-
-   MqlTradeRequest req;
-   MqlTradeResult res;
-
-   ZeroMemory(req);
-   ZeroMemory(res);
-
-   ENUM_POSITION_TYPE type=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-
-   req.action=TRADE_ACTION_DEAL;
-   req.position=ticket;
-   req.symbol=_Symbol;
-   req.volume=PositionGetDouble(POSITION_VOLUME);
-   req.deviation=20;
-
-   if(type==POSITION_TYPE_BUY)
-   {
-      req.type=ORDER_TYPE_SELL;
-      req.price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-   }
-   else
-   {
-      req.type=ORDER_TYPE_BUY;
-      req.price=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-   }
-
-   bool sent = OrderSend(req,res);
-
-   if(!sent || res.retcode!=10009)
-      Print("Close failed retcode: ",res.retcode);
+   trade.SetDeviationInPoints(20);
+   return trade.Sell(volume,_Symbol,0,0,tp);
 }
 
 //================ CLOSE ALL =================//
@@ -236,21 +212,25 @@ void CloseAll()
       if(PositionSelectByTicket(ticket))
       {
          if(PositionGetString(POSITION_SYMBOL)==_Symbol)
-            ClosePosition(ticket);
+            trade.PositionClose(ticket);
       }
    }
 
    buyGridActive=false;
    sellGridActive=false;
-
-   buyGridLevel=0;
-   sellGridLevel=0;
+   lastCloseTime=TimeCurrent();
 }
 
 //================ ENTRY SIGNAL =================//
 
 void CheckEntrySignal()
 {
+   if(!SpreadOK() || !SessionOK() || !VolatilityOK())
+      return;
+
+   if(TimeCurrent()-lastCloseTime < CooldownSeconds)
+      return;
+
    datetime bar=iTime(_Symbol,_Period,1);
 
    if(bar==lastSignalBar)
@@ -268,38 +248,32 @@ void CheckEntrySignal()
    bool downtrend = fastMA < slowMA;
 
    if(rsiPrev < RSIBuyLevel && rsiCur > RSIBuyLevel && uptrend)
-      BuySignalCounter++;
-
-   if(rsiPrev > RSISellLevel && rsiCur < RSISellLevel && downtrend)
-      SellSignalCounter++;
-
-   if(BuySignalCounter >= CompileSignals)
    {
-      double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-      double volume=LotSize*CompileSignals;
-      double tp=ask+(gridSpacing*TakeProfitSpacing);
-
-      if(OpenBuy(volume,tp))
+      if(CountPositions(POSITION_TYPE_BUY)==0)
       {
-         lastBuyPrice=ask;
-         buyGridActive=true;
-         buyGridLevel=1;
-         BuySignalCounter-=CompileSignals;
+         double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+         double tp=ask+(gridSpacing*TakeProfitSpacing);
+
+         if(OpenBuy(LotSize,tp))
+         {
+            lastBuyPrice=ask;
+            buyGridActive=true;
+         }
       }
    }
 
-   if(SellSignalCounter >= CompileSignals)
+   if(rsiPrev > RSISellLevel && rsiCur < RSISellLevel && downtrend)
    {
-      double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-      double volume=LotSize*CompileSignals;
-      double tp=bid-(gridSpacing*TakeProfitSpacing);
-
-      if(OpenSell(volume,tp))
+      if(CountPositions(POSITION_TYPE_SELL)==0)
       {
-         lastSellPrice=bid;
-         sellGridActive=true;
-         sellGridLevel=1;
-         SellSignalCounter-=CompileSignals;
+         double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+         double tp=bid-(gridSpacing*TakeProfitSpacing);
+
+         if(OpenSell(LotSize,tp))
+         {
+            lastSellPrice=bid;
+            sellGridActive=true;
+         }
       }
    }
 }
@@ -313,36 +287,32 @@ void ManageGrid()
 
    if(buyGridActive)
    {
-      if(buyGridLevel < GridSize)
+      int buyCount=CountPositions(POSITION_TYPE_BUY);
+
+      if(buyCount < GridSize)
       {
          if(lastBuyPrice - bid >= gridSpacing)
          {
-            double volume=LotSize*CompileSignals;
             double tp=ask+(gridSpacing*TakeProfitSpacing);
 
-            if(OpenBuy(volume,tp))
-            {
+            if(OpenBuy(LotSize,tp))
                lastBuyPrice=ask;
-               buyGridLevel++;
-            }
          }
       }
    }
 
    if(sellGridActive)
    {
-      if(sellGridLevel < GridSize)
+      int sellCount=CountPositions(POSITION_TYPE_SELL);
+
+      if(sellCount < GridSize)
       {
          if(ask - lastSellPrice >= gridSpacing)
          {
-            double volume=LotSize*CompileSignals;
             double tp=bid-(gridSpacing*TakeProfitSpacing);
 
-            if(OpenSell(volume,tp))
-            {
+            if(OpenSell(LotSize,tp))
                lastSellPrice=bid;
-               sellGridLevel++;
-            }
          }
       }
    }
@@ -369,6 +339,12 @@ void CheckExitSignal()
 
 void ManageBasket()
 {
+   if(!MarginOK() || !EquityOK())
+   {
+      CloseAll();
+      return;
+   }
+
    double profit=BasketProfit();
 
    double target = BasketProfitSpacing * GridSpacingPips;
@@ -378,7 +354,7 @@ void ManageBasket()
       CloseAll();
 }
 
-//================ MAIN =================//
+//================ MAIN LOOP =================//
 
 void OnTick()
 {
