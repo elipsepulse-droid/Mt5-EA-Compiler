@@ -1,13 +1,8 @@
 //+------------------------------------------------------------------+
-//| XAUUSD PRO SCALPER EA v2.1 - COMPILATION SAFE VERSION            |
-//| Fixed: includes, position handling, type casting, stability      |
+//| XAUUSD PRO SCALPER EA v2.2 - NO INCLUDE VERSION (CI SAFE)         |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "2.1"
-#property description "XAUUSD PRO SCALPER FIXED BUILD"
-
-#include <Trade\Trade.mqh>
-CTrade trade;
+#property version   "2.2"
 
 //================ INPUTS =================//
 
@@ -36,12 +31,35 @@ datetime lastDay=0;
 int lossStreak=0;
 
 //+------------------------------------------------------------------+
+// BASIC TRADE FUNCTION (NO CTrade)
+//+------------------------------------------------------------------+
+bool OpenTrade(bool buy,double lot,double sl,double tp)
+{
+   MqlTradeRequest req;
+   MqlTradeResult  res;
+
+   ZeroMemory(req);
+   ZeroMemory(res);
+
+   req.action   = TRADE_ACTION_DEAL;
+   req.symbol   = _Symbol;
+   req.volume   = lot;
+   req.type     = buy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   req.price    = buy ? SymbolInfoDouble(_Symbol,SYMBOL_ASK)
+                      : SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   req.sl       = sl;
+   req.tp       = tp;
+   req.deviation= 10;
+   req.magic    = 123456;
+
+   return OrderSend(req,res);
+}
+
+//+------------------------------------------------------------------+
 int OnInit()
 {
    atrHandle = iATR(_Symbol, PERIOD_M1, ATR_Period);
    rsiHandle = iRSI(_Symbol, PERIOD_M1, RSI_Period, PRICE_CLOSE);
-
-   trade.SetDeviationInPoints(10);
 
    peakEquity = AccountInfoDouble(ACCOUNT_EQUITY);
    dailyStartEquity = peakEquity;
@@ -51,8 +69,6 @@ int OnInit()
 }
 
 //+------------------------------------------------------------------+
-// RISK CONTROL
-//+------------------------------------------------------------------+
 bool RiskOK()
 {
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -61,8 +77,7 @@ bool RiskOK()
       peakEquity = equity;
 
    double dd = (peakEquity - equity)/peakEquity*100.0;
-   if(dd > MaxDrawdownPercent)
-      return false;
+   if(dd > MaxDrawdownPercent) return false;
 
    if(TimeDay(TimeCurrent()) != lastDay)
    {
@@ -71,18 +86,14 @@ bool RiskOK()
    }
 
    double dailyLoss = (dailyStartEquity - equity)/dailyStartEquity*100.0;
-   if(dailyLoss > DailyLossPercent)
-      return false;
+   if(dailyLoss > DailyLossPercent) return false;
 
    double dailyProfit = (equity - dailyStartEquity)/dailyStartEquity*100.0;
-   if(dailyProfit > DailyProfitTarget)
-      return false;
+   if(dailyProfit > DailyProfitTarget) return false;
 
    return true;
 }
 
-//+------------------------------------------------------------------+
-// LOT SIZE
 //+------------------------------------------------------------------+
 double LotSize(double slPoints)
 {
@@ -102,8 +113,6 @@ double LotSize(double slPoints)
 }
 
 //+------------------------------------------------------------------+
-// SPREAD CHECK
-//+------------------------------------------------------------------+
 bool SpreadOK()
 {
    double spread = (SymbolInfoDouble(_Symbol,SYMBOL_ASK) -
@@ -113,195 +122,135 @@ bool SpreadOK()
 }
 
 //+------------------------------------------------------------------+
-// STRUCTURE (BOS)
-//+------------------------------------------------------------------+
 bool BreakStructureUp()
 {
-   double prevHigh = iHigh(_Symbol,PERIOD_M5,1);
-   double currHigh = iHigh(_Symbol,PERIOD_M5,0);
-   return currHigh > prevHigh;
+   return iHigh(_Symbol,PERIOD_M5,0) > iHigh(_Symbol,PERIOD_M5,1);
 }
 
 bool BreakStructureDown()
 {
-   double prevLow = iLow(_Symbol,PERIOD_M5,1);
-   double currLow = iLow(_Symbol,PERIOD_M5,0);
-   return currLow < prevLow;
+   return iLow(_Symbol,PERIOD_M5,0) < iLow(_Symbol,PERIOD_M5,1);
 }
 
 //+------------------------------------------------------------------+
-// LIQUIDITY SWEEP
-//+------------------------------------------------------------------+
 bool SweepLow()
 {
-   double low1=iLow(_Symbol,PERIOD_M1,1);
-   double low2=iLow(_Symbol,PERIOD_M1,2);
-   double close=iClose(_Symbol,PERIOD_M1,1);
-   return (low1 < low2 && close > low2);
+   double l1=iLow(_Symbol,PERIOD_M1,1);
+   double l2=iLow(_Symbol,PERIOD_M1,2);
+   double c=iClose(_Symbol,PERIOD_M1,1);
+   return (l1<l2 && c>l2);
 }
 
 bool SweepHigh()
 {
-   double high1=iHigh(_Symbol,PERIOD_M1,1);
-   double high2=iHigh(_Symbol,PERIOD_M1,2);
-   double close=iClose(_Symbol,PERIOD_M1,1);
-   return (high1 > high2 && close < high2);
+   double h1=iHigh(_Symbol,PERIOD_M1,1);
+   double h2=iHigh(_Symbol,PERIOD_M1,2);
+   double c=iClose(_Symbol,PERIOD_M1,1);
+   return (h1>h2 && c<h2);
 }
 
-//+------------------------------------------------------------------+
-// MOMENTUM
 //+------------------------------------------------------------------+
 bool MomentumBuy()
 {
    double rsi[];
-   if(CopyBuffer(rsiHandle,0,0,1,rsi) <= 0) return false;
-   return rsi[0] > 55;
+   if(CopyBuffer(rsiHandle,0,0,1,rsi)<=0) return false;
+   return rsi[0]>55;
 }
 
 bool MomentumSell()
 {
    double rsi[];
-   if(CopyBuffer(rsiHandle,0,0,1,rsi) <= 0) return false;
-   return rsi[0] < 45;
+   if(CopyBuffer(rsiHandle,0,0,1,rsi)<=0) return false;
+   return rsi[0]<45;
 }
 
-//+------------------------------------------------------------------+
-// VOLUME SPIKE
 //+------------------------------------------------------------------+
 bool VolumeSpike()
 {
-   double v1 = (double)iVolume(_Symbol,PERIOD_M1,1);
+   double v1=(double)iVolume(_Symbol,PERIOD_M1,1);
    double avg=0;
 
    for(int i=2;i<10;i++)
-      avg += (double)iVolume(_Symbol,PERIOD_M1,i);
+      avg+=(double)iVolume(_Symbol,PERIOD_M1,i);
 
-   avg /= 8.0;
+   avg/=8.0;
 
-   return v1 > avg*1.5;
+   return v1>avg*1.5;
 }
 
-//+------------------------------------------------------------------+
-// ATR
 //+------------------------------------------------------------------+
 double GetATRPoints()
 {
    double atr[];
-   if(CopyBuffer(atrHandle,0,0,1,atr) <= 0) return 0;
+   if(CopyBuffer(atrHandle,0,0,1,atr)<=0) return 0;
    return atr[0]/_Point;
 }
 
 //+------------------------------------------------------------------+
-// SIGNAL SCORE
-//+------------------------------------------------------------------+
 int SignalScore(bool buy)
 {
-   int score=0;
+   int s=0;
 
    if(buy)
    {
-      if(SweepLow()) score+=20;
-      if(BreakStructureUp()) score+=25;
-      if(MomentumBuy()) score+=15;
-      if(VolumeSpike()) score+=10;
+      if(SweepLow()) s+=20;
+      if(BreakStructureUp()) s+=25;
+      if(MomentumBuy()) s+=15;
+      if(VolumeSpike()) s+=10;
    }
    else
    {
-      if(SweepHigh()) score+=20;
-      if(BreakStructureDown()) score+=25;
-      if(MomentumSell()) score+=15;
-      if(VolumeSpike()) score+=10;
+      if(SweepHigh()) s+=20;
+      if(BreakStructureDown()) s+=25;
+      if(MomentumSell()) s+=15;
+      if(VolumeSpike()) s+=10;
    }
 
-   if(GetATRPoints() > 0) score+=20;
+   if(GetATRPoints()>0) s+=20;
 
-   return score;
+   return s;
 }
 
-//+------------------------------------------------------------------+
-// MANAGE TRADES
-//+------------------------------------------------------------------+
-void ManageTrades(double atrPoints)
-{
-   for(int i=PositionsTotal()-1; i>=0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-
-      double open = PositionGetDouble(POSITION_PRICE_OPEN);
-      double price= PositionGetDouble(POSITION_PRICE_CURRENT);
-      double sl   = PositionGetDouble(POSITION_SL);
-      double tp   = PositionGetDouble(POSITION_TP);
-      long type   = PositionGetInteger(POSITION_TYPE);
-
-      double profit = (type==POSITION_TYPE_BUY)?
-         (price-open)/_Point:(open-price)/_Point;
-
-      double BE = atrPoints;
-
-      if(profit >= BE)
-         trade.PositionModify(ticket, open, tp);
-
-      double trail = atrPoints * 1.5;
-
-      if(type==POSITION_TYPE_BUY)
-      {
-         double newSL = price - trail*_Point;
-         if(newSL > sl)
-            trade.PositionModify(ticket, newSL, tp);
-      }
-      else
-      {
-         double newSL = price + trail*_Point;
-         if(newSL < sl)
-            trade.PositionModify(ticket, newSL, tp);
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-// ENTRY
 //+------------------------------------------------------------------+
 void CheckTrade()
 {
    if(!RiskOK()) return;
    if(!SpreadOK()) return;
-   if(PositionsTotal() >= MaxTrades) return;
+   if(PositionsTotal()>=MaxTrades) return;
 
    double atrPoints = GetATRPoints();
-   if(atrPoints <= 0) return;
+   if(atrPoints<=0) return;
 
    int buyScore = SignalScore(true);
    int sellScore= SignalScore(false);
 
-   double slPoints = atrPoints * 1.2;
-   double RR = (buyScore > sellScore) ? RR_Max : RR_Min;
-   double tpPoints = slPoints * RR;
+   double slPoints = atrPoints*1.2;
+   double RR = (buyScore>sellScore)?RR_Max:RR_Min;
+   double tpPoints = slPoints*RR;
 
    double lot = LotSize(slPoints);
 
-   double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-   double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
 
-   if(buyScore >= ScoreThreshold)
+   if(buyScore>=ScoreThreshold)
    {
-      double sl = bid - slPoints*_Point;
-      double tp = bid + tpPoints*_Point;
+      double sl=bid-slPoints*_Point;
+      double tp=bid+tpPoints*_Point;
 
-      if(trade.Buy(lot,_Symbol,ask,sl,tp))
-         lossStreak = 0;
+      if(OpenTrade(true,lot,sl,tp))
+         lossStreak=0;
       else
          lossStreak++;
    }
 
-   if(sellScore >= ScoreThreshold)
+   if(sellScore>=ScoreThreshold)
    {
-      double sl = ask + slPoints*_Point;
-      double tp = ask - tpPoints*_Point;
+      double sl=ask+slPoints*_Point;
+      double tp=ask-tpPoints*_Point;
 
-      if(trade.Sell(lot,_Symbol,bid,sl,tp))
-         lossStreak = 0;
+      if(OpenTrade(false,lot,sl,tp))
+         lossStreak=0;
       else
          lossStreak++;
    }
@@ -313,12 +262,8 @@ void OnTick()
    static datetime lastBar=0;
    datetime currentBar=iTime(_Symbol,PERIOD_M1,0);
 
-   double atrPoints = GetATRPoints();
-
-   ManageTrades(atrPoints);
-
-   if(currentBar == lastBar) return;
-   lastBar = currentBar;
+   if(currentBar==lastBar) return;
+   lastBar=currentBar;
 
    CheckTrade();
 }
