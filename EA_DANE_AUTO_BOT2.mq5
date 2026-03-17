@@ -1,9 +1,7 @@
 //+------------------------------------------------------------------+
-//| XAUUSD AGGRESSIVE SCALPER PRO v4 (HIGH FREQUENCY)               |
-//| Designed for M1–M5, Exness-compatible, no Trade.mqh             |
+//| XAUUSD AGGRESSIVE SCALPER PRO v5 (COMPILATION FIXED)            |
 //+------------------------------------------------------------------+
 #property strict
-#property version "4.0"
 
 //================ INPUTS =================//
 
@@ -14,18 +12,21 @@ input int RSI_Period = 7;
 input int MaxTrades = 10;
 input int SpreadLimit = 60;
 
-input int ScoreThreshold = 50;     // main entries
-input int AggressiveScore = 40;    // fallback entries
+input int ScoreThreshold = 50;
+input int AggressiveScore = 40;
 
-//================ GLOBAL =================//
+//================ HANDLES =================//
 
-int atrHandle, rsiHandle;
+int atrHandle, rsiHandle, maFastHandle, maSlowHandle;
 
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   atrHandle = iATR(_Symbol, PERIOD_M1, ATR_Period);
-   rsiHandle = iRSI(_Symbol, PERIOD_M1, RSI_Period, PRICE_CLOSE);
+   atrHandle    = iATR(_Symbol, PERIOD_M1, ATR_Period);
+   rsiHandle    = iRSI(_Symbol, PERIOD_M1, RSI_Period, PRICE_CLOSE);
+   maFastHandle = iMA(_Symbol, PERIOD_M1, 5, 0, MODE_EMA, PRICE_CLOSE);
+   maSlowHandle = iMA(_Symbol, PERIOD_M1, 20, 0, MODE_EMA, PRICE_CLOSE);
+
    return(INIT_SUCCEEDED);
 }
 
@@ -63,16 +64,22 @@ bool MomentumSell()
 //+------------------------------------------------------------------+
 bool FastTrendBuy()
 {
-   double maFast = iMA(_Symbol, PERIOD_M1, 5, 0, MODE_EMA, PRICE_CLOSE, 0);
-   double maSlow = iMA(_Symbol, PERIOD_M1, 20, 0, MODE_EMA, PRICE_CLOSE, 0);
-   return maFast > maSlow;
+   double fast[], slow[];
+
+   if(CopyBuffer(maFastHandle,0,0,1,fast)<=0) return false;
+   if(CopyBuffer(maSlowHandle,0,0,1,slow)<=0) return false;
+
+   return fast[0] > slow[0];
 }
 
 bool FastTrendSell()
 {
-   double maFast = iMA(_Symbol, PERIOD_M1, 5, 0, MODE_EMA, PRICE_CLOSE, 0);
-   double maSlow = iMA(_Symbol, PERIOD_M1, 20, 0, MODE_EMA, PRICE_CLOSE, 0);
-   return maFast < maSlow;
+   double fast[], slow[];
+
+   if(CopyBuffer(maFastHandle,0,0,1,fast)<=0) return false;
+   if(CopyBuffer(maSlowHandle,0,0,1,slow)<=0) return false;
+
+   return fast[0] < slow[0];
 }
 
 //+------------------------------------------------------------------+
@@ -124,12 +131,9 @@ double LotSize(double slPoints)
 
    double minLot=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
    double maxLot=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
-   double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
 
    lot = MathMax(minLot, MathMin(maxLot, lot));
-   lot = NormalizeDouble(lot,2);
-
-   return lot;
+   return NormalizeDouble(lot,2);
 }
 
 //+------------------------------------------------------------------+
@@ -152,8 +156,7 @@ bool OpenTrade(bool buy,double lot,double sl,double tp)
    req.deviation= 20;
    req.magic    = 777;
 
-   if(!OrderSend(req,res))
-      return false;
+   if(!OrderSend(req,res)) return false;
 
    return (res.retcode == TRADE_RETCODE_DONE);
 }
@@ -195,48 +198,32 @@ void CheckTrade()
    double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
 
-   //================ MAIN ENTRIES =================//
-
    if(buyScore >= ScoreThreshold)
    {
-      double sl = bid - slPoints*_Point;
-      double tp = bid + tpPoints*_Point;
-      OpenTrade(true,lot,sl,tp);
+      OpenTrade(true,lot,bid-slPoints*_Point,bid+tpPoints*_Point);
    }
 
    if(sellScore >= ScoreThreshold)
    {
-      double sl = ask + slPoints*_Point;
-      double tp = ask - tpPoints*_Point;
-      OpenTrade(false,lot,sl,tp);
+      OpenTrade(false,lot,ask+slPoints*_Point,ask-tpPoints*_Point);
    }
-
-   //================ AGGRESSIVE ENTRIES =================//
 
    if(buyScore >= AggressiveScore && MomentumBuy())
    {
-      double sl = bid - slPoints*_Point;
-      double tp = bid + (slPoints*1.0)*_Point;
-      OpenTrade(true,lot,sl,tp);
+      OpenTrade(true,lot,bid-slPoints*_Point,bid+(slPoints*1.0)*_Point);
    }
 
    if(sellScore >= AggressiveScore && MomentumSell())
    {
-      double sl = ask + slPoints*_Point;
-      double tp = ask - (slPoints*1.0)*_Point;
-      OpenTrade(false,lot,sl,tp);
+      OpenTrade(false,lot,ask+slPoints*_Point,ask-(slPoints*1.0)*_Point);
    }
-
-   //================ FORCED SCALPING =================//
 
    static int force=0;
    force++;
 
-   if(force >= 8) // ensures frequent trades
+   if(force >= 8)
    {
-      double sl = bid - slPoints*_Point;
-      double tp = bid + (slPoints*0.8)*_Point;
-      OpenTrade(true,lot,sl,tp);
+      OpenTrade(true,lot,bid-slPoints*_Point,bid+(slPoints*0.8)*_Point);
       force=0;
    }
 }
