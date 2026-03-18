@@ -10,9 +10,9 @@
 //|   - Active trades count and floating P/L                         |
 //|   - Lot size fully editable from inputs                          |
 //+------------------------------------------------------------------+
-#property copyright   "EA SCALPING ROBOT / DANE - v3.3"
-#property version     "3.30"
-#property description "Grid EA with Live Dashboard — XAUUSD/BTCUSD Cent & Standard"
+#property copyright   "EA SCALPING ROBOT / DANE - v3.4"
+#property version     "3.40"
+#property description "Grid EA with Live Dashboard — XAUUSD/BTCUSD Cent & Standard v3.4"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -194,9 +194,30 @@ int OnInit()
       g_gridSLMult     = InpGridSLMult;
    }
 
-   g_spacingPoints    = g_spacingPips    * 10.0 * _Point;
-   g_trailStartPoints = g_trailStartPips * 10.0 * _Point;
-   g_trailStepPoints  = g_trailStepPips  * 10.0 * _Point;
+   // ---------------------------------------------------------------
+   // PIP SIZE CALCULATION — digit-aware for all Exness symbol types
+   //
+   // XAUUSD  / XAUUSDm  (_Digits=2): _Point=0.01  → 1 pip = 0.10  → mult=10
+   // XAUUSDm / XAUUSDc  (_Digits=3): _Point=0.001 → 1 pip = 0.10  → mult=100
+   // BTCUSD  / BTCUSDm  (_Digits=2): _Point=0.01  → 1 pip = 0.10  → mult=10
+   //
+   // Formula: pipSize = 10^(_Digits-1) * _Point
+   // This guarantees 1 pip = $0.10 movement regardless of broker decimal count
+   // ---------------------------------------------------------------
+   double pipSize;
+   if(_Digits == 3)       pipSize = 0.100;   // e.g. XAUUSDm with 3 decimals
+   else if(_Digits == 2)  pipSize = 0.100;   // e.g. XAUUSD  with 2 decimals
+   else if(_Digits == 5)  pipSize = 0.00010; // FX pairs with 5 decimals
+   else if(_Digits == 4)  pipSize = 0.0010;  // FX pairs with 4 decimals
+   else                   pipSize = _Point * 10.0; // fallback
+
+   g_spacingPoints    = g_spacingPips    * pipSize;
+   g_trailStartPoints = g_trailStartPips * pipSize;
+   g_trailStepPoints  = g_trailStepPips  * pipSize;
+
+   Print("Symbol digits: ", _Digits, " | _Point: ", _Point,
+         " | Pip size used: ", pipSize,
+         " | Spacing in price: ", g_spacingPoints);
 
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpSlippage);
@@ -362,11 +383,12 @@ void MonitorGridProfit()
 {
    if(CountPositions(POSITION_TYPE_BUY)==0 && CountPositions(POSITION_TYPE_SELL)==0) return;
    double tp=GetTotalGridProfit();
-   double tv=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
-   double ts=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
-   double pv=(tv/ts)*(_Point*10.0)*g_lotSize;
-   double maxP= g_maxProfitMult*g_spacingPips*pv;
-   double maxL=-g_gridSLMult   *g_spacingPips*pv;
+   // Use tick value directly with g_spacingPoints for accurate cent/standard calculation
+   double tv  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double ts  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double pv  = (tv / ts) * g_spacingPoints * g_lotSize; // value of 1 spacing move
+   double maxP=  g_maxProfitMult * pv;
+   double maxL= -g_gridSLMult    * pv;
    if(InpCloseAtMaxProfit && tp>=maxP){ Print("MAX PROFIT → closing grid."); CloseAllGridOrders(); return; }
    if(tp<=maxL){ Print("GRID SL → closing grid."); CloseAllGridOrders(); }
 }
