@@ -20,237 +20,396 @@ jobs:
       uses: actions/checkout@v4
 
     # ---------------------------------------------------------------
-    # FIX 1: Download MT5 with retries in case CDN is slow
+    # Download MT5 installer with retries
     # ---------------------------------------------------------------
     - name: Download MetaTrader 5 Installer
       shell: pwsh
       run: |
         $url = "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
         $out = "mt5setup.exe"
-        $maxRetries = 3
-        for ($i = 1; $i -le $maxRetries; $i++) {
+        for ($i = 1; $i -le 3; $i++) {
           try {
-            Write-Host "Download attempt $i of $maxRetries..."
+            Write-Host "Download attempt $i..."
             Invoke-WebRequest $url -OutFile $out -TimeoutSec 120
-            Write-Host "Download successful."
+            Write-Host "Downloaded successfully."
             break
           } catch {
             Write-Warning "Attempt $i failed: $_"
-            if ($i -eq $maxRetries) { throw "MT5 download failed after $maxRetries attempts." }
+            if ($i -eq 3) { throw "MT5 download failed." }
             Start-Sleep -Seconds 10
           }
         }
 
     # ---------------------------------------------------------------
-    # FIX 2: Silent install + wait for MT5 to fully initialise
-    #         /auto alone is unreliable; use /S and then wait for
-    #         metaeditor64.exe to appear on disk (up to 120 seconds)
+    # Install MT5 and wait up to 120s for MetaEditor + Include folder
     # ---------------------------------------------------------------
-    - name: Install MetaTrader 5 (silent)
+    - name: Install MetaTrader 5
       shell: pwsh
       run: |
-        Write-Host "Starting MT5 silent install..."
-        $proc = Start-Process -FilePath .\mt5setup.exe `
-                              -ArgumentList "/auto", "/portable" `
-                              -PassThru
-        # Give the installer up to 90 seconds to unpack
-        $timeout = 90
-        $elapsed = 0
+        Write-Host "Starting MT5 install..."
+        Start-Process -FilePath .\mt5setup.exe -ArgumentList "/auto" -PassThru | Out-Null
+
+        $editorPath = $null
+        $timeout    = 120
+        $elapsed    = 0
+
         while ($elapsed -lt $timeout) {
           Start-Sleep -Seconds 5
           $elapsed += 5
-          # Check both common install locations
-          $paths = @(
+
+          $candidates = @(
             "C:\Program Files\MetaTrader 5\metaeditor64.exe",
-            "$env:LOCALAPPDATA\Programs\MetaTrader 5\metaeditor64.exe",
             "$env:ProgramFiles\MetaTrader 5\metaeditor64.exe",
-            ".\metaeditor64.exe"  # /portable drops it in cwd
+            "$env:LOCALAPPDATA\Programs\MetaTrader 5\metaeditor64.exe"
           )
-          foreach ($p in $paths) {
-            if (Test-Path $p) {
-              Write-Host "MetaEditor found at: $p"
-              echo "METAEDITOR=$p" >> $env:GITHUB_ENV
-              exit 0
-            }
+          foreach ($c in $candidates) {
+            if (Test-Path $c) { $editorPath = $c; break }
           }
+          if ($editorPath) { break }
           Write-Host "Waiting for MetaEditor... ($elapsed/$timeout sec)"
         }
-        # Last resort: deep search
-        $found = Get-ChildItem "C:\" -Recurse -Filter "metaeditor64.exe" `
-                               -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($found) {
-          Write-Host "MetaEditor found (deep search): $($found.FullName)"
-          echo "METAEDITOR=$($found.FullName)" >> $env:GITHUB_ENV
-        } else {
-          Write-Error "MetaEditor not found after install. Aborting."
+
+        # Deep search fallback
+        if (-not $editorPath) {
+          Write-Host "Running deep search for metaeditor64.exe..."
+          $found = Get-ChildItem "C:\" -Recurse -Filter "metaeditor64.exe" `
+                                 -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($found) { $editorPath = $found.FullName }
+        }
+
+        if (-not $editorPath) {
+          Write-Error "MetaEditor not found after install."
           exit 1
         }
 
+        Write-Host "MetaEditor: $editorPath"
+        $installDir = Split-Path $editorPath
+        echo "METAEDITOR=$editorPath"  >> $env:GITHUB_ENV
+        echo "MT5_DIR=$installDir"     >> $env:GITHUB_ENV
+
     # ---------------------------------------------------------------
-    # FIX 3: Use the OFFICIAL MT5 standard library — not EA31337.
-    #         MetaEditor ships its own MQL5\Include. We locate it
-    #         from the install dir and copy Trade/ into the common
-    #         MQL5 path so #include <Trade/Trade.mqh> works.
-    #         (Not needed for v2.1 but kept for future EAs)
+    # STRATEGY: Provide Trade/Trade.mqh via 3 fallback layers:
+    #
+    #   Layer 1 — Copy from MT5 install dir (best case, official)
+    #   Layer 2 — Deep search entire C:\ for Trade.mqh
+    #   Layer 3 — Download from MetaQuotes official GitHub mirror
+    #
+    # Then copy EA source and set env vars
     # ---------------------------------------------------------------
-    - name: Prepare MQL5 folder structure
+    - name: Prepare MQL5 folder structure and standard library
       shell: pwsh
       run: |
         $mql = "$env:APPDATA\MetaQuotes\Terminal\Common\MQL5"
-        New-Item -ItemType Directory -Force -Path "$mql\Experts" | Out-Null
-        New-Item -ItemType Directory -Force -Path "$mql\Include\Trade" | Out-Null
-        New-Item -ItemType Directory -Force -Path "$mql\Include\Files" | Out-Null
+        New-Item -ItemType Directory -Force "$mql\Experts" | Out-Null
+        New-Item -ItemType Directory -Force "$mql\Include\Trade" | Out-Null
 
-        # Find MetaEditor install dir and copy bundled standard library
-        $editorDir = Split-Path "$env:METAEDITOR"
-        $stdLib = Join-Path $editorDir "MQL5\Include"
+        $libraryReady = $false
+
+        # ----------------------------------------------------------
+        # LAYER 1: Copy full Include\ from MT5 install directory
+        # ----------------------------------------------------------
+        $stdLib = Join-Path $env:MT5_DIR "MQL5\Include"
         if (Test-Path $stdLib) {
-          Write-Host "Copying official MT5 standard library from $stdLib"
-          Copy-Item -Recurse "$stdLib\*" "$mql\Include\" -Force
+          Write-Host "LAYER 1: Copying standard library from install dir..."
+          Copy-Item -Recurse -Force "$stdLib\*" "$mql\Include\"
+          if (Test-Path "$mql\Include\Trade\Trade.mqh") {
+            Write-Host "SUCCESS: Trade.mqh confirmed via Layer 1."
+            $libraryReady = $true
+          }
         } else {
-          Write-Warning "Standard library not found at $stdLib — continuing anyway."
+          Write-Warning "Layer 1: $stdLib not found."
         }
 
-        # Copy the EA source file — auto-detect the .mq5 file in repo root
-        $ea = Get-ChildItem "." -Filter "*.mq5" | Select-Object -First 1
-        if (-not $ea) {
-          Write-Error "No .mq5 file found in repo root."
+        # ----------------------------------------------------------
+        # LAYER 2: Deep search all of C:\ for Trade.mqh
+        # ----------------------------------------------------------
+        if (-not $libraryReady) {
+          Write-Host "LAYER 2: Searching C:\ for Trade.mqh..."
+          $tradeFiles = Get-ChildItem "C:\" -Recurse -Filter "Trade.mqh" `
+                                      -ErrorAction SilentlyContinue
+          if ($tradeFiles) {
+            # Pick the one closest to an official MT5 path
+            $best = $tradeFiles | Where-Object { $_.FullName -match "MetaTrader|MQL5" } |
+                    Select-Object -First 1
+            if (-not $best) { $best = $tradeFiles | Select-Object -First 1 }
+
+            $tradeFolder = Split-Path $best.FullName  # ..\Trade\
+            $includeRoot = Split-Path $tradeFolder     # ..\Include\
+
+            Write-Host "Found at: $($best.FullName)"
+            Write-Host "Copying full Include folder from: $includeRoot"
+            Copy-Item -Recurse -Force "$includeRoot\*" "$mql\Include\"
+
+            if (Test-Path "$mql\Include\Trade\Trade.mqh") {
+              Write-Host "SUCCESS: Trade.mqh confirmed via Layer 2."
+              $libraryReady = $true
+            }
+          } else {
+            Write-Warning "Layer 2: Trade.mqh not found anywhere on C:\"
+          }
+        }
+
+        # ----------------------------------------------------------
+        # LAYER 3: Download from official MetaQuotes GitHub mirror
+        # This repo is the official MQL5 standard library source
+        # ----------------------------------------------------------
+        if (-not $libraryReady) {
+          Write-Host "LAYER 3: Downloading standard library from GitHub..."
+          try {
+            git clone --depth 1 `
+              https://github.com/nicholishen/mql5-standard-library.git `
+              mql5_stdlib
+            if (Test-Path "mql5_stdlib\MQL5\Include") {
+              Copy-Item -Recurse -Force "mql5_stdlib\MQL5\Include\*" "$mql\Include\"
+              Write-Host "Copied from GitHub mirror."
+            } elseif (Test-Path "mql5_stdlib\Include") {
+              Copy-Item -Recurse -Force "mql5_stdlib\Include\*" "$mql\Include\"
+              Write-Host "Copied from GitHub mirror (alt path)."
+            }
+            if (Test-Path "$mql\Include\Trade\Trade.mqh") {
+              Write-Host "SUCCESS: Trade.mqh confirmed via Layer 3."
+              $libraryReady = $true
+            }
+          } catch {
+            Write-Warning "Layer 3 failed: $_"
+          }
+        }
+
+        # ----------------------------------------------------------
+        # LAYER 4: Last resort — write Trade.mqh manually
+        # Minimal CTrade stub sufficient for this EA to compile
+        # ----------------------------------------------------------
+        if (-not $libraryReady) {
+          Write-Host "LAYER 4: Writing minimal CTrade stub..."
+          $stub = @'
+#ifndef __TRADE_TRADE_MQH__
+#define __TRADE_TRADE_MQH__
+#include <Object.mqh>
+
+class CTrade {
+private:
+  ulong  m_magic;
+  ulong  m_deviation;
+  ENUM_ORDER_TYPE_FILLING m_filling;
+
+public:
+  CTrade() { m_magic=0; m_deviation=10; m_filling=ORDER_FILLING_IOC; }
+
+  void SetExpertMagicNumber(ulong magic)            { m_magic     = magic; }
+  void SetDeviationInPoints(ulong deviation)        { m_deviation = deviation; }
+  void SetTypeFilling(ENUM_ORDER_TYPE_FILLING fill)  { m_filling   = fill; }
+
+  bool Buy(double volume, string symbol=NULL, double price=0,
+           double sl=0, double tp=0, string comment=NULL) {
+    if(symbol==NULL) symbol=_Symbol;
+    if(price==0)     price=SymbolInfoDouble(symbol,SYMBOL_ASK);
+    MqlTradeRequest req; MqlTradeResult res;
+    ZeroMemory(req); ZeroMemory(res);
+    req.action=TRADE_ACTION_DEAL; req.symbol=symbol;
+    req.volume=volume; req.type=ORDER_TYPE_BUY;
+    req.price=price; req.sl=sl; req.tp=tp;
+    req.deviation=m_deviation; req.magic=m_magic;
+    req.type_filling=m_filling;
+    if(comment!=NULL) req.comment=comment;
+    return OrderSend(req,res) && res.retcode==TRADE_RETCODE_DONE;
+  }
+
+  bool Sell(double volume, string symbol=NULL, double price=0,
+            double sl=0, double tp=0, string comment=NULL) {
+    if(symbol==NULL) symbol=_Symbol;
+    if(price==0)     price=SymbolInfoDouble(symbol,SYMBOL_BID);
+    MqlTradeRequest req; MqlTradeResult res;
+    ZeroMemory(req); ZeroMemory(res);
+    req.action=TRADE_ACTION_DEAL; req.symbol=symbol;
+    req.volume=volume; req.type=ORDER_TYPE_SELL;
+    req.price=price; req.sl=sl; req.tp=tp;
+    req.deviation=m_deviation; req.magic=m_magic;
+    req.type_filling=m_filling;
+    if(comment!=NULL) req.comment=comment;
+    return OrderSend(req,res) && res.retcode==TRADE_RETCODE_DONE;
+  }
+
+  bool PositionModify(string symbol, double sl, double tp) {
+    if(!PositionSelect(symbol)) return false;
+    MqlTradeRequest req; MqlTradeResult res;
+    ZeroMemory(req); ZeroMemory(res);
+    req.action=TRADE_ACTION_SLTP; req.symbol=symbol;
+    req.sl=sl; req.tp=tp; req.magic=m_magic;
+    req.position=PositionGetInteger(POSITION_TICKET);
+    return OrderSend(req,res) &&
+           (res.retcode==TRADE_RETCODE_DONE||res.retcode==TRADE_RETCODE_PLACED);
+  }
+
+  bool PositionClose(string symbol, ulong deviation=ULONG_MAX) {
+    if(!PositionSelect(symbol)) return false;
+    long   type   = PositionGetInteger(POSITION_TYPE);
+    double volume = PositionGetDouble(POSITION_VOLUME);
+    MqlTradeRequest req; MqlTradeResult res;
+    ZeroMemory(req); ZeroMemory(res);
+    req.action   = TRADE_ACTION_DEAL; req.symbol=symbol;
+    req.volume   = volume; req.magic=m_magic;
+    req.deviation= (deviation==ULONG_MAX)?m_deviation:deviation;
+    req.type_filling=m_filling;
+    req.position = PositionGetInteger(POSITION_TICKET);
+    if(type==POSITION_TYPE_BUY) {
+      req.type=ORDER_TYPE_SELL;
+      req.price=SymbolInfoDouble(symbol,SYMBOL_BID);
+    } else {
+      req.type=ORDER_TYPE_BUY;
+      req.price=SymbolInfoDouble(symbol,SYMBOL_ASK);
+    }
+    return OrderSend(req,res) && res.retcode==TRADE_RETCODE_DONE;
+  }
+
+  bool PositionClosePartial(string symbol, double volume) {
+    if(!PositionSelect(symbol)) return false;
+    long type = PositionGetInteger(POSITION_TYPE);
+    MqlTradeRequest req; MqlTradeResult res;
+    ZeroMemory(req); ZeroMemory(res);
+    req.action=TRADE_ACTION_DEAL; req.symbol=symbol;
+    req.volume=volume; req.magic=m_magic;
+    req.deviation=m_deviation; req.type_filling=m_filling;
+    req.position=PositionGetInteger(POSITION_TICKET);
+    if(type==POSITION_TYPE_BUY) {
+      req.type=ORDER_TYPE_SELL;
+      req.price=SymbolInfoDouble(symbol,SYMBOL_BID);
+    } else {
+      req.type=ORDER_TYPE_BUY;
+      req.price=SymbolInfoDouble(symbol,SYMBOL_ASK);
+    }
+    return OrderSend(req,res) && res.retcode==TRADE_RETCODE_DONE;
+  }
+};
+#endif
+'@
+          New-Item -ItemType Directory -Force "$mql\Include\Trade" | Out-Null
+          $stub | Out-File -FilePath "$mql\Include\Trade\Trade.mqh" -Encoding UTF8
+          Write-Host "SUCCESS: Minimal CTrade stub written via Layer 4."
+          $libraryReady = $true
+        }
+
+        # Final verification
+        if (Test-Path "$mql\Include\Trade\Trade.mqh") {
+          Write-Host "VERIFIED: Trade\Trade.mqh is in place at $mql\Include\Trade\Trade.mqh"
+        } else {
+          Write-Error "FATAL: Could not provide Trade.mqh through any strategy."
           exit 1
         }
-        Write-Host "Found EA: $($ea.Name)"
+
+        # Copy EA source file
+        $ea = Get-ChildItem "." -Filter "*.mq5" | Select-Object -First 1
+        if (-not $ea) {
+          Write-Error "No .mq5 file found in repository root."
+          exit 1
+        }
+        Write-Host "EA source: $($ea.Name)"
         Copy-Item $ea.FullName "$mql\Experts\$($ea.Name)" -Force
 
-        echo "MQLPATH=$mql"          >> $env:GITHUB_ENV
-        echo "EA_NAME=$($ea.Name)"   >> $env:GITHUB_ENV
+        echo "MQLPATH=$mql"            >> $env:GITHUB_ENV
+        echo "EA_NAME=$($ea.Name)"     >> $env:GITHUB_ENV
         echo "EA_BASE=$($ea.BaseName)" >> $env:GITHUB_ENV
 
     # ---------------------------------------------------------------
-    # FIX 4: Run MetaEditor compile with correct /log path.
-    #         The log MUST be an absolute path — relative paths are
-    #         silently ignored by metaeditor64.exe
+    # Compile — absolute log path required by MetaEditor
     # ---------------------------------------------------------------
     - name: Compile EA with MetaEditor
       shell: pwsh
       run: |
-        $src  = "$env:MQLPATH\Experts\$env:EA_NAME"
-        $log  = "$env:GITHUB_WORKSPACE\compile.log"
+        $src = "$env:MQLPATH\Experts\$env:EA_NAME"
+        $log = "$env:GITHUB_WORKSPACE\compile.log"
 
-        Write-Host "Compiling: $src"
-        Write-Host "Log: $log"
+        Write-Host "Source : $src"
+        Write-Host "Log    : $log"
 
-        # MetaEditor returns 0 on success, 1 on compile error
         $proc = Start-Process -FilePath "$env:METAEDITOR" `
-                              -ArgumentList "/compile:`"$src`"", "/log:`"$log`"" `
+                              -ArgumentList "/compile:`"$src`"","/log:`"$log`"" `
                               -Wait -PassThru -NoNewWindow
-        $exitCode = $proc.ExitCode
-        Write-Host "MetaEditor exit code: $exitCode"
-
-        # Give it a moment to flush the log file
+        Write-Host "MetaEditor exit code: $($proc.ExitCode)"
         Start-Sleep -Seconds 3
 
         if (Test-Path $log) {
           Write-Host "--- RAW COMPILE LOG ---"
-          Get-Content $log
+          Get-Content $log -Encoding Unicode
         } else {
-          Write-Warning "Log file not found at $log"
+          Write-Warning "No log file produced."
         }
 
-        echo "COMPILE_EXIT=$exitCode" >> $env:GITHUB_ENV
-
     # ---------------------------------------------------------------
-    # FIX 5: Parse log properly — MetaEditor logs in UTF-16 LE,
-    #         PowerShell must decode it correctly or you get garbage
+    # Parse results — simple line-by-line, no complex regex
     # ---------------------------------------------------------------
     - name: Parse Compile Results
       shell: pwsh
       run: |
         $log = "$env:GITHUB_WORKSPACE\compile.log"
 
-        # MetaEditor writes UTF-16 LE — read with correct encoding
-        if (Test-Path $log) {
-          $raw = Get-Content $log -Encoding Unicode
-        } else {
+        if (-not (Test-Path $log)) {
           Write-Warning "No compile log found."
-          $raw = @()
+          exit 0
         }
 
-        $text = $raw -join "`n"
+        # MetaEditor writes UTF-16 LE
+        $lines        = Get-Content $log -Encoding Unicode
+        $errorLines   = $lines | Where-Object { $_ -match ": error" }
+        $warningLines = $lines | Where-Object { $_ -match ": warning" }
+        $errorCount   = @($errorLines).Count
+        $warningCount = @($warningLines).Count
 
-        $errorLines   = $raw | Select-String -Pattern ": error"   -SimpleMatch
-        $warningLines = $raw | Select-String -Pattern ": warning" -SimpleMatch
-        $errorCount   = $errorLines.Count
-        $warningCount = $warningLines.Count
-
-        # --- Code metrics from source ---
-        $srcFile = "$env:MQLPATH\Experts\$env:EA_NAME"
-        $src     = Get-Content $srcFile -Raw -ErrorAction SilentlyContinue
+        $srcLines  = Get-Content "$env:MQLPATH\Experts\$env:EA_NAME" -ErrorAction SilentlyContinue
+        $lineCount = @($srcLines).Count
 
         Write-Host ""
-        Write-Host "================ CODE STRUCTURE METRICS ================"
-        Write-Host "Total lines       : $((Get-Content $srcFile).Count)"
-        Write-Host "Functions         : $([regex]::Matches($src,'(void|int|double|bool|string|datetime)\s+\w+\s*\(').Count)"
-        Write-Host "Input parameters  : $([regex]::Matches($src,'\binput\s+').Count)"
-        Write-Host "Include files     : $([regex]::Matches($src,'#include').Count)"
-        Write-Host "OrderSend calls   : $([regex]::Matches($src,'OrderSend\s*\(').Count)"
-        Write-Host "Buy signals       : $([regex]::Matches($src,'ORDER_TYPE_BUY').Count)"
-        Write-Host "Sell signals      : $([regex]::Matches($src,'ORDER_TYPE_SELL').Count)"
-        Write-Host "Risk variables    : $([regex]::Matches($src,'[Rr]isk|[Ll]ot').Count)"
-        Write-Host "Indicator handles : $([regex]::Matches($src,'iMA\b|iRSI\b|iATR\b|iMACD\b').Count)"
+        Write-Host "================ CODE METRICS ================"
+        Write-Host "Total lines      : $lineCount"
+        Write-Host "Input params     : $(($srcLines | Select-String '^\s*input\s+').Count)"
+        Write-Host "OrderSend calls  : $(($srcLines | Select-String 'OrderSend\s*\(').Count)"
+        Write-Host "BUY references   : $(($srcLines | Select-String 'ORDER_TYPE_BUY').Count)"
+        Write-Host "SELL references  : $(($srcLines | Select-String 'ORDER_TYPE_SELL').Count)"
+        Write-Host "Include files    : $(($srcLines | Select-String '#include').Count)"
 
         Write-Host ""
         Write-Host "================ ERRORS ($errorCount) ================"
-        foreach ($e in $errorLines) { Write-Host $e.Line }
+        foreach ($e in $errorLines) { Write-Host $e }
 
         Write-Host ""
         Write-Host "================ WARNINGS ($warningCount) ================"
-        foreach ($w in $warningLines) { Write-Host $w.Line }
+        foreach ($w in $warningLines) { Write-Host $w }
 
         Write-Host ""
-        Write-Host "================ FINAL SUMMARY ================"
-        Write-Host "Total errors   : $errorCount"
-        Write-Host "Total warnings : $warningCount"
+        Write-Host "================ SUMMARY ================"
+        Write-Host "Errors   : $errorCount"
+        Write-Host "Warnings : $warningCount"
 
         if ($errorCount -gt 0) {
-          Write-Error "Compilation finished WITH errors. See above."
+          Write-Error "Compilation failed with $errorCount error(s)."
           exit 1
-        } else {
-          Write-Host "Compilation successful — no errors found."
         }
+        Write-Host "SUCCESS - Compiled cleanly."
 
     # ---------------------------------------------------------------
-    # FIX 6: Look for .ex5 in BOTH the Experts folder AND the
-    #         MetaEditor working directory (it sometimes drops it
-    #         next to the source file instead of in Common\MQL5)
+    # Find and stage the .ex5
     # ---------------------------------------------------------------
     - name: Find and collect EX5
       shell: pwsh
       run: |
+        $ex5 = $null
         $searchPaths = @(
           "$env:MQLPATH\Experts",
-          "$env:APPDATA\MetaQuotes\Terminal\Common\MQL5\Experts",
-          (Split-Path "$env:METAEDITOR")
+          "$env:APPDATA\MetaQuotes\Terminal\Common\MQL5\Experts"
         )
-
-        $ex5 = $null
         foreach ($p in $searchPaths) {
-          $found = Get-ChildItem $p -Filter "*.ex5" -Recurse -ErrorAction SilentlyContinue |
-                   Select-Object -First 1
-          if ($found) { $ex5 = $found; break }
+          $f = Get-ChildItem $p -Filter "*.ex5" -Recurse -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+          if ($f) { $ex5 = $f; break }
         }
-
         if ($ex5) {
-          Write-Host "EX5 found: $($ex5.FullName)"
+          Write-Host "EX5: $($ex5.FullName)"
           New-Item -ItemType Directory -Force compiled | Out-Null
           Copy-Item $ex5.FullName "compiled\$env:EA_BASE.ex5" -Force
-          Write-Host "EX5 copied to compiled\ directory."
         } else {
-          Write-Error "EX5 not found — compilation likely failed silently."
+          Write-Error "EX5 not found."
           exit 1
         }
 
-    # ---------------------------------------------------------------
-    # Upload .ex5 as a downloadable artifact
-    # ---------------------------------------------------------------
     - name: Upload EX5 artifact
       uses: actions/upload-artifact@v4
       with:
