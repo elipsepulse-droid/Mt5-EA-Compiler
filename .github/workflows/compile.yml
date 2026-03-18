@@ -116,7 +116,8 @@ jobs:
         $stubs = @(
           ".github\mql5-stub\Trade\Trade.mqh",
           ".github\mql5-stub\Trade\PositionInfo.mqh",
-          ".github\mql5-stub\Trade\OrderInfo.mqh"
+          ".github\mql5-stub\Trade\OrderInfo.mqh",
+          ".github\mql5-stub\Trade\AccountInfo.mqh"
         )
         foreach ($s in $stubs) {
           if (-not (Test-Path $s)) {
@@ -162,7 +163,7 @@ jobs:
           $copiedCount++
         }
 
-        Write-Host "All 3 stubs deployed to $copiedCount locations."
+        Write-Host "All 4 stubs deployed to $copiedCount locations."
 
     # ---------------------------------------------------------------
     # STEP 3: Copy EA to Experts folder and set env vars
