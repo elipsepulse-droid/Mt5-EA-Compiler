@@ -112,52 +112,57 @@ jobs:
     - name: Deploy Trade.mqh to all terminal Include folders
       shell: pwsh
       run: |
-        $stubSrc = ".github\mql5-stub\Trade\Trade.mqh"
-        if (-not (Test-Path $stubSrc)) {
-          Write-Error "Trade.mqh stub not found at $stubSrc — did you commit it?"
-          exit 1
+        # Verify all stub files exist in repo
+        $stubs = @(
+          ".github\mql5-stub\Trade\Trade.mqh",
+          ".github\mql5-stub\Trade\PositionInfo.mqh",
+          ".github\mql5-stub\Trade\OrderInfo.mqh"
+        )
+        foreach ($s in $stubs) {
+          if (-not (Test-Path $s)) {
+            Write-Error "Stub not found: $s — did you commit it?"
+            exit 1
+          }
+          Write-Host "Stub found: $s"
         }
-        Write-Host "Stub source: $stubSrc"
 
         $copiedCount = 0
 
-        # Copy to Common MQL5
-        $commonPath = "$env:APPDATA\MetaQuotes\Terminal\Common\MQL5\Include\Trade"
-        New-Item -ItemType Directory -Force $commonPath | Out-Null
-        Copy-Item -Force $stubSrc "$commonPath\Trade.mqh"
-        Write-Host "Copied to: $commonPath"
-        $copiedCount++
+        # All destination roots to copy into
+        $destRoots = [System.Collections.Generic.List[string]]::new()
 
-        # Copy to ALL terminal hash folders (now they exist after dummy compile)
+        # Common MQL5
+        $destRoots.Add("$env:APPDATA\MetaQuotes\Terminal\Common\MQL5\Include\Trade")
+
+        # All terminal hash folders (created by dummy compile)
         $terminalRoot = "$env:APPDATA\MetaQuotes\Terminal"
         if (Test-Path $terminalRoot) {
           $dirs = Get-ChildItem $terminalRoot -Directory -ErrorAction SilentlyContinue
           foreach ($dir in $dirs) {
-            $incPath = "$($dir.FullName)\MQL5\Include\Trade"
-            New-Item -ItemType Directory -Force $incPath | Out-Null
-            Copy-Item -Force $stubSrc "$incPath\Trade.mqh"
-            Write-Host "Copied to: $incPath"
-            $copiedCount++
+            $destRoots.Add("$($dir.FullName)\MQL5\Include\Trade")
           }
         }
 
-        # Copy to MetaEditor install dir
-        $editorInc = Join-Path $env:MT5_DIR "MQL5\Include\Trade"
-        New-Item -ItemType Directory -Force $editorInc | Out-Null
-        Copy-Item -Force $stubSrc "$editorInc\Trade.mqh"
-        Write-Host "Copied to: $editorInc"
-        $copiedCount++
+        # MetaEditor install dir
+        $destRoots.Add((Join-Path $env:MT5_DIR "MQL5\Include\Trade"))
 
-        # Copy to Program Files MT5
-        $pfPath = "C:\Program Files\MetaTrader 5\MQL5\Include\Trade"
+        # Program Files MT5
         if (Test-Path "C:\Program Files\MetaTrader 5") {
-          New-Item -ItemType Directory -Force $pfPath | Out-Null
-          Copy-Item -Force $stubSrc "$pfPath\Trade.mqh"
-          Write-Host "Copied to: $pfPath"
+          $destRoots.Add("C:\Program Files\MetaTrader 5\MQL5\Include\Trade")
+        }
+
+        # Copy ALL stubs to ALL locations
+        foreach ($dest in $destRoots) {
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          foreach ($stub in $stubs) {
+            $fileName = Split-Path $stub -Leaf
+            Copy-Item -Force $stub "$dest\$fileName"
+          }
+          Write-Host "Deployed all stubs to: $dest"
           $copiedCount++
         }
 
-        Write-Host "Trade.mqh deployed to $copiedCount locations."
+        Write-Host "All 3 stubs deployed to $copiedCount locations."
 
     # ---------------------------------------------------------------
     # STEP 3: Copy EA to Experts folder and set env vars
