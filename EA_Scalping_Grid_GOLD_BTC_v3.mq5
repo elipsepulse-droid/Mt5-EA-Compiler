@@ -12,7 +12,7 @@
 //+------------------------------------------------------------------+
 #property copyright   "EA SCALPING ROBOT / DANE - v3.5"
 #property version     "3.50"
-#property description "Grid EA with Live Dashboard — v3.5 Orphan Fix"
+#property description "Grid EA v3.5 — Orphan Fix + Debug Logger"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -76,7 +76,8 @@ input bool   InpShowDashboard  = true;    // Show dashboard panel on chart
 input int    InpDashX          = 10;      // Dashboard X position (pixels from left)
 input int    InpDashY          = 20;      // Dashboard Y position (pixels from top)
 
-input group "====== GENERAL ======"
+input group "====== DEBUG ======"
+input bool InpDebugLog = true; // Print signal status on every new bar (check Experts tab)
 input ulong  InpMagicNumber = 654321;
 input int    InpSlippage    = 50;
 
@@ -284,18 +285,27 @@ void OnTick()
 
    if(InpUseDailyLoss && IsDailyLossBreached()) return;
 
-   int bars = MathMax(MathMax(InpRSI_Shift, InpTF_Shift), InpExit_Shift) + 3;
+   // Use 10 bars minimum — safer buffer for all indicator calculations
+   // EMA(300) needs 300 bars to warm up; CopyBuffer only needs recent values
+   // but requesting too few can cause silent failures on newly attached charts
+   int bars = MathMax(MathMax(InpRSI_Shift, InpTF_Shift), InpExit_Shift) + 10;
 
    double rsi_val[], tf_fast[], tf_slow[], exit_fast[], exit_slow[];
    ArraySetAsSeries(rsi_val,   true); ArraySetAsSeries(tf_fast,   true);
    ArraySetAsSeries(tf_slow,   true); ArraySetAsSeries(exit_fast, true);
    ArraySetAsSeries(exit_slow, true);
 
-   if(CopyBuffer(rsi_handle,       0,0,bars,rsi_val)   < bars) return;
-   if(CopyBuffer(tf_fast_handle,   0,0,bars,tf_fast)   < bars) return;
-   if(CopyBuffer(tf_slow_handle,   0,0,bars,tf_slow)   < bars) return;
-   if(CopyBuffer(exit_fast_handle, 0,0,bars,exit_fast) < bars) return;
-   if(CopyBuffer(exit_slow_handle, 0,0,bars,exit_slow) < bars) return;
+   // CopyBuffer failure check — now with explanation printed to Experts tab
+   if(CopyBuffer(rsi_handle,       0,0,bars,rsi_val)   < bars)
+   { if(InpDebugLog) Print("DEBUG: RSI buffer not ready yet — waiting for more bars."); return; }
+   if(CopyBuffer(tf_fast_handle,   0,0,bars,tf_fast)   < bars)
+   { if(InpDebugLog) Print("DEBUG: EMA(",InpTF_FastPeriod,") buffer not ready yet."); return; }
+   if(CopyBuffer(tf_slow_handle,   0,0,bars,tf_slow)   < bars)
+   { if(InpDebugLog) Print("DEBUG: EMA(",InpTF_SlowPeriod,") buffer not ready — needs ",InpTF_SlowPeriod," bars of history."); return; }
+   if(CopyBuffer(exit_fast_handle, 0,0,bars,exit_fast) < bars)
+   { if(InpDebugLog) Print("DEBUG: Exit EMA(",InpExit_FastPeriod,") buffer not ready yet."); return; }
+   if(CopyBuffer(exit_slow_handle, 0,0,bars,exit_slow) < bars)
+   { if(InpDebugLog) Print("DEBUG: Exit EMA(",InpExit_SlowPeriod,") buffer not ready yet."); return; }
 
    bool hasBuys  = (CountPositions(POSITION_TYPE_BUY)  > 0);
    bool hasSells = (CountPositions(POSITION_TYPE_SELL) > 0);
@@ -322,6 +332,33 @@ void OnTick()
    int rs = InpRSI_Shift;
    bool buyOK  = (rsi_val[rs] >  g_rsiBuyLvl  && rsi_val[rs+1] <= g_rsiBuyLvl);
    bool sellOK = (rsi_val[rs] <  g_rsiSellLvl && rsi_val[rs+1] >= g_rsiSellLvl);
+
+   // --- DEBUG: Print full signal status every new bar ---
+   if(InpDebugLog)
+   {
+      string trendStr = tUp ? "UPTREND" : (tDn ? "DOWNTREND" : "FLAT/UNCLEAR");
+      Print("--- NEW BAR --- ",
+            "RSI[1]=", DoubleToString(rsi_val[rs],2),
+            " RSI[2]=", DoubleToString(rsi_val[rs+1],2),
+            " | BuyOK=", buyOK, " SellOK=", sellOK,
+            " | Trend=", trendStr,
+            " EMA", InpTF_FastPeriod, "=", DoubleToString(tf_fast[InpTF_Shift],3),
+            " EMA", InpTF_SlowPeriod, "=", DoubleToString(tf_slow[InpTF_Shift],3),
+            " | BuyLvl=", g_rsiBuyLvl, " SellLvl=", g_rsiSellLvl,
+            " | HasBuys=", hasBuys, " HasSells=", hasSells);
+
+      // Tell user exactly what is blocking the trade
+      if(!buyOK && !sellOK)
+         Print("  → No entry: RSI has not crossed ", g_rsiBuyLvl, " or ", g_rsiSellLvl, " yet. Current RSI=", DoubleToString(rsi_val[rs],2));
+      else if(buyOK && !tUp)
+         Print("  → BUY signal blocked: RSI crossed UP but trend is ", trendStr, " — need UPTREND (EMA",InpTF_FastPeriod,">EMA",InpTF_SlowPeriod,")");
+      else if(sellOK && !tDn)
+         Print("  → SELL signal blocked: RSI crossed DOWN but trend is ", trendStr, " — need DOWNTREND (EMA",InpTF_FastPeriod,"<EMA",InpTF_SlowPeriod,")");
+      else if(buyOK && tUp && hasBuys)
+         Print("  → BUY blocked: BUY grid already active.");
+      else if(sellOK && tDn && hasSells)
+         Print("  → SELL blocked: SELL grid already active.");
+   }
 
    if(buyOK  && tUp && !hasBuys)  OpenBuyGrid();
    if(sellOK && tDn && !hasSells) OpenSellGrid();
