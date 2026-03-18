@@ -66,12 +66,12 @@ int OnInit()
    // Create all handles once
    handleATR      = iATR(_Symbol, PERIOD_CURRENT, ATR_Period);
    handleEMAFast  = iMA(_Symbol, PERIOD_CURRENT, EMA_Fast,  0, MODE_EMA, PRICE_CLOSE);
-   handleEMaSlow  = iMA(_Symbol, PERIOD_CURRENT, EMA_Slow,  0, MODE_EMA, PRICE_CLOSE);
+   handleEMASlow  = iMA(_Symbol, PERIOD_CURRENT, EMA_Slow,  0, MODE_EMA, PRICE_CLOSE);
    handleEMATrend = iMA(_Symbol, PERIOD_CURRENT, EMA_Trend, 0, MODE_EMA, PRICE_CLOSE);
    handleRSI      = iRSI(_Symbol, PERIOD_CURRENT, RSI_Period, PRICE_CLOSE);
 
    if(handleATR == INVALID_HANDLE || handleEMAFast == INVALID_HANDLE ||
-      handleEMaSlow == INVALID_HANDLE || handleEMATrend == INVALID_HANDLE ||
+      handleEMASlow == INVALID_HANDLE || handleEMATrend == INVALID_HANDLE ||
       handleRSI == INVALID_HANDLE)
    {
       Print("ERROR: Failed to create indicator handles. EA will not run.");
@@ -88,7 +88,7 @@ void OnDeinit(const int reason)
 {
    IndicatorRelease(handleATR);
    IndicatorRelease(handleEMAFast);
-   IndicatorRelease(handleEMaSlow);
+   IndicatorRelease(handleEMASlow);
    IndicatorRelease(handleEMATrend);
    IndicatorRelease(handleRSI);
 }
@@ -320,7 +320,7 @@ void OnTick()
 
    // Read all indicators from bar 1 (closed candle — no repainting)
    double emaFast  = GetIndicatorValue(handleEMAFast,  0, 1);
-   double emaSlow  = GetIndicatorValue(handleEMaSlow,  0, 1);
+   double emaSlow  = GetIndicatorValue(handleEMASlow,  0, 1);
    double emaTrend = GetIndicatorValue(handleEMATrend, 0, 1);
    double rsi      = GetIndicatorValue(handleRSI,      0, 1);
    double close1   = iClose(_Symbol, PERIOD_CURRENT, 1);
