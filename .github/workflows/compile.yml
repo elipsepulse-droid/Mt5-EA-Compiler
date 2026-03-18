@@ -32,7 +32,7 @@ jobs:
             break
           } catch {
             Write-Warning "Attempt $i failed: $_"
-            if ($i -eq 3) { throw "MT5 download failed after 3 attempts." }
+            if ($i -eq 3) { throw "MT5 download failed." }
             Start-Sleep -Seconds 10
           }
         }
@@ -73,89 +73,59 @@ jobs:
         echo "MT5_DIR=$installDir"    >> $env:GITHUB_ENV
 
     # ---------------------------------------------------------------
-    # IMPORTANT: Repo stub is checked FIRST (Layer 1) — guaranteed
-    # to always be available, skips all slow fallbacks.
-    # Only falls back to MT5 install dir if stub is missing.
+    # Copy Trade.mqh to EVERY possible Include location MetaEditor
+    # might look — Common MQL5, all terminal-specific folders, and
+    # the MetaEditor install dir itself.
     # ---------------------------------------------------------------
     - name: Prepare MQL5 folder structure and Trade library
       shell: pwsh
       run: |
-        $mql = "$env:APPDATA\MetaQuotes\Terminal\Common\MQL5"
-        New-Item -ItemType Directory -Force "$mql\Experts"       | Out-Null
-        New-Item -ItemType Directory -Force "$mql\Include\Trade" | Out-Null
-
-        $libraryReady = $false
-
-        # -------------------------------------------------------
-        # LAYER 1 — Repo-committed stub (FASTEST, always present)
-        # Path: .github/mql5-stub/Trade/Trade.mqh
-        # -------------------------------------------------------
         $stubSrc = ".github\mql5-stub\Trade\Trade.mqh"
-        if (Test-Path $stubSrc) {
-          Write-Host "LAYER 1: Using repo-committed Trade.mqh stub..."
-          Copy-Item -Force $stubSrc "$mql\Include\Trade\Trade.mqh"
-          if (Test-Path "$mql\Include\Trade\Trade.mqh") {
-            Write-Host "LAYER 1 SUCCESS - Trade.mqh is ready."
-            $libraryReady = $true
-          }
-        } else {
-          Write-Warning "LAYER 1: Stub not found at $stubSrc"
-        }
-
-        # -------------------------------------------------------
-        # LAYER 2 — Official MT5 install dir (no C:\ scan)
-        # -------------------------------------------------------
-        if (-not $libraryReady) {
-          Write-Host "LAYER 2: Trying MT5 install directory..."
-          $stdLib = Join-Path $env:MT5_DIR "MQL5\Include"
-          if (Test-Path $stdLib) {
-            Write-Host "Copying from $stdLib"
-            Copy-Item -Recurse -Force "$stdLib\*" "$mql\Include\"
-            if (Test-Path "$mql\Include\Trade\Trade.mqh") {
-              Write-Host "LAYER 2 SUCCESS."
-              $libraryReady = $true
-            }
-          } else {
-            Write-Warning "LAYER 2: MT5 standard library not found at $stdLib"
-          }
-        }
-
-        # -------------------------------------------------------
-        # LAYER 3 — Targeted search (only Trade folder, not C:\)
-        # -------------------------------------------------------
-        if (-not $libraryReady) {
-          Write-Host "LAYER 3: Targeted search for Trade.mqh..."
-          $searchRoots = @(
-            "C:\Program Files\MetaTrader 5",
-            "$env:LOCALAPPDATA\Programs\MetaTrader 5",
-            "$env:APPDATA\MetaQuotes"
-          )
-          foreach ($root in $searchRoots) {
-            if (-not (Test-Path $root)) { continue }
-            $hit = Get-ChildItem $root -Recurse -Filter "Trade.mqh" `
-                                  -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($hit) {
-              $tradeDir   = Split-Path $hit.FullName
-              $includeDir = Split-Path $tradeDir
-              Write-Host "Found at: $($hit.FullName)"
-              Copy-Item -Recurse -Force "$includeDir\*" "$mql\Include\" -ErrorAction SilentlyContinue
-              if (Test-Path "$mql\Include\Trade\Trade.mqh") {
-                Write-Host "LAYER 3 SUCCESS."
-                $libraryReady = $true
-                break
-              }
-            }
-          }
-        }
-
-        # Final check — should never reach here if stub is committed
-        if (-not (Test-Path "$mql\Include\Trade\Trade.mqh")) {
-          Write-Error "FATAL: Trade\Trade.mqh could not be provided."
+        if (-not (Test-Path $stubSrc)) {
+          Write-Error "Trade.mqh stub not found at $stubSrc"
           exit 1
         }
-        Write-Host "Trade\Trade.mqh confirmed ready."
+        Write-Host "Stub found: $stubSrc"
 
-        # Auto-detect EA .mq5 in repo root
+        # 1. Common MQL5 path
+        $commonInclude = "$env:APPDATA\MetaQuotes\Terminal\Common\MQL5\Include\Trade"
+        New-Item -ItemType Directory -Force $commonInclude | Out-Null
+        Copy-Item -Force $stubSrc "$commonInclude\Trade.mqh"
+        Write-Host "Copied to Common: $commonInclude"
+
+        # 2. ALL terminal-specific folders (the one MetaEditor actually uses)
+        #    Path: AppData\Roaming\MetaQuotes\Terminal\<HASH>\MQL5\Include\Trade\
+        $terminalRoot = "$env:APPDATA\MetaQuotes\Terminal"
+        if (Test-Path $terminalRoot) {
+          $terminalDirs = Get-ChildItem $terminalRoot -Directory -ErrorAction SilentlyContinue
+          foreach ($dir in $terminalDirs) {
+            $incPath = "$($dir.FullName)\MQL5\Include\Trade"
+            New-Item -ItemType Directory -Force $incPath | Out-Null
+            Copy-Item -Force $stubSrc "$incPath\Trade.mqh"
+            Write-Host "Copied to terminal: $incPath"
+          }
+        }
+
+        # 3. MetaEditor install directory Include folder
+        $editorInclude = Join-Path $env:MT5_DIR "MQL5\Include\Trade"
+        New-Item -ItemType Directory -Force $editorInclude | Out-Null
+        Copy-Item -Force $stubSrc "$editorInclude\Trade.mqh"
+        Write-Host "Copied to editor dir: $editorInclude"
+
+        # 4. Also copy to Program Files MT5 Include if it exists
+        $pfInclude = "C:\Program Files\MetaTrader 5\MQL5\Include\Trade"
+        if (Test-Path "C:\Program Files\MetaTrader 5") {
+          New-Item -ItemType Directory -Force $pfInclude | Out-Null
+          Copy-Item -Force $stubSrc "$pfInclude\Trade.mqh"
+          Write-Host "Copied to Program Files: $pfInclude"
+        }
+
+        Write-Host "Trade.mqh deployed to all Include locations."
+
+        # Set up Experts folder and copy EA
+        $mql = "$env:APPDATA\MetaQuotes\Terminal\Common\MQL5"
+        New-Item -ItemType Directory -Force "$mql\Experts" | Out-Null
+
         $ea = Get-ChildItem "." -Filter "*.mq5" | Select-Object -First 1
         if (-not $ea) {
           Write-Error "No .mq5 file found in repo root."
@@ -187,6 +157,10 @@ jobs:
           Write-Warning "No compile log produced."
         }
 
+    # ---------------------------------------------------------------
+    # FIX: No backslash regex or subexpressions inside strings
+    # All Select-String patterns use only simple literal strings
+    # ---------------------------------------------------------------
     - name: Parse Compile Results
       shell: pwsh
       run: |
@@ -195,23 +169,31 @@ jobs:
           Write-Warning "No compile log found."
           exit 0
         }
+
         $lines        = Get-Content $log -Encoding Unicode
         $errorLines   = $lines | Where-Object { $_ -match ": error" }
         $warningLines = $lines | Where-Object { $_ -match ": warning" }
         $errorCount   = @($errorLines).Count
         $warningCount = @($warningLines).Count
 
-        $srcLines  = Get-Content "$env:MQLPATH\Experts\$env:EA_NAME" -ErrorAction SilentlyContinue
+        $srcPath  = "$env:MQLPATH\Experts\$env:EA_NAME"
+        $srcLines = Get-Content $srcPath -ErrorAction SilentlyContinue
         $lineCount = @($srcLines).Count
+
+        $inputCount   = ($srcLines | Select-String "input "    ).Count
+        $buyCount     = ($srcLines | Select-String "ORDER_TYPE_BUY"  ).Count
+        $sellCount    = ($srcLines | Select-String "ORDER_TYPE_SELL" ).Count
+        $includeCount = ($srcLines | Select-String "#include"        ).Count
+        $osCount      = ($srcLines | Select-String "OrderSend"       ).Count
 
         Write-Host ""
         Write-Host "================ CODE METRICS ================"
         Write-Host "Total lines     : $lineCount"
-        Write-Host "Input params    : $(($srcLines | Select-String '^\s*input\s+').Count)"
-        Write-Host "OrderSend calls : $(($srcLines | Select-String 'OrderSend\s*\(').Count)"
-        Write-Host "BUY references  : $(($srcLines | Select-String 'ORDER_TYPE_BUY').Count)"
-        Write-Host "SELL references : $(($srcLines | Select-String 'ORDER_TYPE_SELL').Count)"
-        Write-Host "Include files   : $(($srcLines | Select-String '#include').Count)"
+        Write-Host "Input params    : $inputCount"
+        Write-Host "OrderSend calls : $osCount"
+        Write-Host "BUY references  : $buyCount"
+        Write-Host "SELL references : $sellCount"
+        Write-Host "Include files   : $includeCount"
 
         Write-Host ""
         Write-Host "================ ERRORS ($errorCount) ================"
@@ -235,7 +217,11 @@ jobs:
       shell: pwsh
       run: |
         $ex5 = $null
-        foreach ($p in @("$env:MQLPATH\Experts","$env:APPDATA\MetaQuotes\Terminal\Common\MQL5\Experts")) {
+        $searchPaths = @(
+          "$env:MQLPATH\Experts",
+          "$env:APPDATA\MetaQuotes\Terminal\Common\MQL5\Experts"
+        )
+        foreach ($p in $searchPaths) {
           $f = Get-ChildItem $p -Filter "*.ex5" -Recurse -ErrorAction SilentlyContinue |
                Select-Object -First 1
           if ($f) { $ex5 = $f; break }
