@@ -455,7 +455,7 @@ void CreateDashboard()
    
    // Title bar
    DashRect("TITLE_BG", x,   y,    w,   36, C'0,100,140',  C'0,120,160', 0);
-   DashLabel("TITLE",   x+10, y+8,  "⚡ DANE GRID EA v3.3",  13, clrWhite,    true);
+   DashLabel("TITLE",   x+10, y+8,  "⚡ DANE GRID EA v3.5",  13, clrWhite,    true);
    DashLabel("VERSION", x+220,y+10, "by Dane",               9,  clrAqua,    false);
 
    // Account type badge
