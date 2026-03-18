@@ -73,56 +73,98 @@ jobs:
         echo "MT5_DIR=$installDir"    >> $env:GITHUB_ENV
 
     # ---------------------------------------------------------------
-    # Copy Trade.mqh to EVERY possible Include location MetaEditor
-    # might look — Common MQL5, all terminal-specific folders, and
-    # the MetaEditor install dir itself.
+    # STEP 1: Run MetaEditor once on a dummy file
+    # This forces MetaEditor to create its hashed terminal data folder
+    # under AppData\Roaming\MetaQuotes\Terminal\<HASH>\MQL5\
+    # We don't care if this compile fails — we just need the folders
     # ---------------------------------------------------------------
-    - name: Prepare MQL5 folder structure and Trade library
+    - name: Initialize MetaEditor terminal data folder
+      shell: pwsh
+      run: |
+        # Create a tiny dummy MQ5 file to trigger MetaEditor init
+        $dummyPath = "$env:TEMP\dummy_init.mq5"
+        Set-Content -Path $dummyPath -Value "void OnTick(){}"
+
+        Write-Host "Running MetaEditor to initialize terminal folders..."
+        $proc = Start-Process -FilePath "$env:METAEDITOR" `
+                              -ArgumentList "/compile:`"$dummyPath`"" `
+                              -Wait -PassThru -NoNewWindow
+        Write-Host "Init exit code: $($proc.ExitCode) (non-zero is OK here)"
+
+        # Wait a moment for folder creation to complete
+        Start-Sleep -Seconds 5
+
+        # Show what terminal folders now exist
+        $terminalRoot = "$env:APPDATA\MetaQuotes\Terminal"
+        Write-Host "Terminal folders created:"
+        if (Test-Path $terminalRoot) {
+          Get-ChildItem $terminalRoot -Directory | ForEach-Object {
+            Write-Host "  $($_.FullName)"
+          }
+        } else {
+          Write-Warning "Terminal root not found at $terminalRoot"
+        }
+
+    # ---------------------------------------------------------------
+    # STEP 2: Now copy Trade.mqh into EVERY terminal folder
+    # The hashed folder now exists after the dummy compile above
+    # ---------------------------------------------------------------
+    - name: Deploy Trade.mqh to all terminal Include folders
       shell: pwsh
       run: |
         $stubSrc = ".github\mql5-stub\Trade\Trade.mqh"
         if (-not (Test-Path $stubSrc)) {
-          Write-Error "Trade.mqh stub not found at $stubSrc"
+          Write-Error "Trade.mqh stub not found at $stubSrc — did you commit it?"
           exit 1
         }
-        Write-Host "Stub found: $stubSrc"
+        Write-Host "Stub source: $stubSrc"
 
-        # 1. Common MQL5 path
-        $commonInclude = "$env:APPDATA\MetaQuotes\Terminal\Common\MQL5\Include\Trade"
-        New-Item -ItemType Directory -Force $commonInclude | Out-Null
-        Copy-Item -Force $stubSrc "$commonInclude\Trade.mqh"
-        Write-Host "Copied to Common: $commonInclude"
+        $copiedCount = 0
 
-        # 2. ALL terminal-specific folders (the one MetaEditor actually uses)
-        #    Path: AppData\Roaming\MetaQuotes\Terminal\<HASH>\MQL5\Include\Trade\
+        # Copy to Common MQL5
+        $commonPath = "$env:APPDATA\MetaQuotes\Terminal\Common\MQL5\Include\Trade"
+        New-Item -ItemType Directory -Force $commonPath | Out-Null
+        Copy-Item -Force $stubSrc "$commonPath\Trade.mqh"
+        Write-Host "Copied to: $commonPath"
+        $copiedCount++
+
+        # Copy to ALL terminal hash folders (now they exist after dummy compile)
         $terminalRoot = "$env:APPDATA\MetaQuotes\Terminal"
         if (Test-Path $terminalRoot) {
-          $terminalDirs = Get-ChildItem $terminalRoot -Directory -ErrorAction SilentlyContinue
-          foreach ($dir in $terminalDirs) {
+          $dirs = Get-ChildItem $terminalRoot -Directory -ErrorAction SilentlyContinue
+          foreach ($dir in $dirs) {
             $incPath = "$($dir.FullName)\MQL5\Include\Trade"
             New-Item -ItemType Directory -Force $incPath | Out-Null
             Copy-Item -Force $stubSrc "$incPath\Trade.mqh"
-            Write-Host "Copied to terminal: $incPath"
+            Write-Host "Copied to: $incPath"
+            $copiedCount++
           }
         }
 
-        # 3. MetaEditor install directory Include folder
-        $editorInclude = Join-Path $env:MT5_DIR "MQL5\Include\Trade"
-        New-Item -ItemType Directory -Force $editorInclude | Out-Null
-        Copy-Item -Force $stubSrc "$editorInclude\Trade.mqh"
-        Write-Host "Copied to editor dir: $editorInclude"
+        # Copy to MetaEditor install dir
+        $editorInc = Join-Path $env:MT5_DIR "MQL5\Include\Trade"
+        New-Item -ItemType Directory -Force $editorInc | Out-Null
+        Copy-Item -Force $stubSrc "$editorInc\Trade.mqh"
+        Write-Host "Copied to: $editorInc"
+        $copiedCount++
 
-        # 4. Also copy to Program Files MT5 Include if it exists
-        $pfInclude = "C:\Program Files\MetaTrader 5\MQL5\Include\Trade"
+        # Copy to Program Files MT5
+        $pfPath = "C:\Program Files\MetaTrader 5\MQL5\Include\Trade"
         if (Test-Path "C:\Program Files\MetaTrader 5") {
-          New-Item -ItemType Directory -Force $pfInclude | Out-Null
-          Copy-Item -Force $stubSrc "$pfInclude\Trade.mqh"
-          Write-Host "Copied to Program Files: $pfInclude"
+          New-Item -ItemType Directory -Force $pfPath | Out-Null
+          Copy-Item -Force $stubSrc "$pfPath\Trade.mqh"
+          Write-Host "Copied to: $pfPath"
+          $copiedCount++
         }
 
-        Write-Host "Trade.mqh deployed to all Include locations."
+        Write-Host "Trade.mqh deployed to $copiedCount locations."
 
-        # Set up Experts folder and copy EA
+    # ---------------------------------------------------------------
+    # STEP 3: Copy EA to Experts folder and set env vars
+    # ---------------------------------------------------------------
+    - name: Prepare EA source
+      shell: pwsh
+      run: |
         $mql = "$env:APPDATA\MetaQuotes\Terminal\Common\MQL5"
         New-Item -ItemType Directory -Force "$mql\Experts" | Out-Null
 
@@ -138,6 +180,9 @@ jobs:
         echo "EA_NAME=$($ea.Name)"     >> $env:GITHUB_ENV
         echo "EA_BASE=$($ea.BaseName)" >> $env:GITHUB_ENV
 
+    # ---------------------------------------------------------------
+    # STEP 4: Real compile
+    # ---------------------------------------------------------------
     - name: Compile EA with MetaEditor
       shell: pwsh
       run: |
@@ -157,10 +202,6 @@ jobs:
           Write-Warning "No compile log produced."
         }
 
-    # ---------------------------------------------------------------
-    # FIX: No backslash regex or subexpressions inside strings
-    # All Select-String patterns use only simple literal strings
-    # ---------------------------------------------------------------
     - name: Parse Compile Results
       shell: pwsh
       run: |
@@ -169,31 +210,22 @@ jobs:
           Write-Warning "No compile log found."
           exit 0
         }
-
         $lines        = Get-Content $log -Encoding Unicode
         $errorLines   = $lines | Where-Object { $_ -match ": error" }
         $warningLines = $lines | Where-Object { $_ -match ": warning" }
         $errorCount   = @($errorLines).Count
         $warningCount = @($warningLines).Count
 
-        $srcPath  = "$env:MQLPATH\Experts\$env:EA_NAME"
-        $srcLines = Get-Content $srcPath -ErrorAction SilentlyContinue
+        $srcLines  = Get-Content "$env:MQLPATH\Experts\$env:EA_NAME" -ErrorAction SilentlyContinue
         $lineCount = @($srcLines).Count
-
-        $inputCount   = ($srcLines | Select-String "input "    ).Count
-        $buyCount     = ($srcLines | Select-String "ORDER_TYPE_BUY"  ).Count
-        $sellCount    = ($srcLines | Select-String "ORDER_TYPE_SELL" ).Count
-        $includeCount = ($srcLines | Select-String "#include"        ).Count
-        $osCount      = ($srcLines | Select-String "OrderSend"       ).Count
 
         Write-Host ""
         Write-Host "================ CODE METRICS ================"
         Write-Host "Total lines     : $lineCount"
-        Write-Host "Input params    : $inputCount"
-        Write-Host "OrderSend calls : $osCount"
-        Write-Host "BUY references  : $buyCount"
-        Write-Host "SELL references : $sellCount"
-        Write-Host "Include files   : $includeCount"
+        Write-Host "Input params    : $(($srcLines | Select-String 'input ').Count)"
+        Write-Host "BUY references  : $(($srcLines | Select-String 'ORDER_TYPE_BUY').Count)"
+        Write-Host "SELL references : $(($srcLines | Select-String 'ORDER_TYPE_SELL').Count)"
+        Write-Host "Include files   : $(($srcLines | Select-String '#include').Count)"
 
         Write-Host ""
         Write-Host "================ ERRORS ($errorCount) ================"
