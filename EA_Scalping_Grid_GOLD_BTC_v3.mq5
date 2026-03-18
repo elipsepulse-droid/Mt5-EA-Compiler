@@ -1,29 +1,33 @@
 //+------------------------------------------------------------------+
-//|         EA_Scalping_Grid_GOLD_BTC_v3.mq5                         |
+//|         EA_Scalping_Grid_GOLD_BTC_v3.2.mq5                       |
 //|     Universal Grid Scalping Robot - XAUUSD & BTCUSD M5           |
 //|                                                                  |
-//|  AUTO-DETECTS symbol and applies correct settings automatically  |
+//|  v3.2 CHANGES:                                                   |
+//|  - Full Exness Cent Account support (XAUUSDc, BTCUSDc)           |
+//|  - Auto-detects cent account & adjusts money values to USC       |
+//|  - Safe preset for 2000 USC ($20 USD) small capital              |
+//|  - Daily loss limit in account currency (USC or USD auto)        |
+//|  - Grid reduced to 4 orders for cent account safety              |
 //|                                                                  |
-//|  XAUUSD (Gold):                                                  |
-//|   - Spacing: 80 pips | Lot: 0.01 | RSI: 35/65                   |
-//|   - Trades Mon–Fri (market hours)                                |
-//|   - Best PHT time: 8:00 PM – 11:00 PM                           |
+//|  SYMBOL SUPPORT (auto-detected):                                 |
+//|  XAUUSD, XAUUSDm, XAUUSDc — Gold standard / cent / raw          |
+//|  BTCUSD, BTCUSDm, BTCUSDc — BTC  standard / cent / raw          |
 //|                                                                  |
-//|  BTCUSD (Bitcoin):                                               |
-//|   - Spacing: 250 pips | Lot: 0.001 | RSI: 30/70                 |
-//|   - Trades 24/7 including weekends                               |
-//|   - Best PHT time: 8:00 PM – 12:00 AM (US session overlap)      |
+//|  CENT ACCOUNT NOTE:                                              |
+//|  2000 USC = $20.00 USD real money (USC = US Cents)               |
+//|  All money values (profit/loss/balance) shown in USC on MT5      |
 //|                                                                  |
-//|  STRATEGY (same for both):                                       |
+//|  STRATEGY:                                                       |
 //|  ENTRY  : RSI crosses UP/DOWN through levels → BUY/SELL Grid    |
 //|  FILTER : EMA(100) vs EMA(300) trend direction                  |
 //|  EXIT   : EMA(50) crosses EMA(200) — directional exit           |
 //|  TRAIL  : Trailing stop to lock in profits                       |
 //|  SAFETY : Daily loss limit + Grid SL + Max Profit target         |
+//|  Best PHT time: 8:00 PM – 11:00 PM (London + NY overlap)        |
 //+------------------------------------------------------------------+
-#property copyright   "EA SCALPING ROBOT / DANE - v3.0"
-#property version     "3.00"
-#property description "Universal Grid EA — XAUUSD & BTCUSD M5"
+#property copyright   "EA SCALPING ROBOT / DANE - v3.2"
+#property version     "3.20"
+#property description "Universal Grid EA — XAUUSD/BTCUSD — Cent & Standard Account"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -36,11 +40,11 @@
 
 input group "====== SYMBOL MODE ======"
 input bool InpAutoDetect = true;
-// If true  → EA reads the chart symbol and applies correct preset automatically
-// If false → EA uses the manual settings below for everything
+// true  = EA auto-detects symbol & account type, applies correct preset
+// false = EA uses manual values below
 
-input group "====== GRID SETUP (Manual Override / Auto if AutoDetect=true) ======"
-input int    InpGridSize       = 6;       // Grid Size (orders per side)
+input group "====== GRID SETUP (Manual / Auto-overridden if AutoDetect=true) ======"
+input int    InpGridSize       = 4;       // Grid Size (orders per side)
 input double InpSpacingPips    = 80;      // Spacing in Pips
 input double InpLotSize        = 0.01;    // Volume per Order (Lot)
 input bool   InpMoveGrid       = true;    // Move Grid
@@ -50,7 +54,7 @@ input bool   InpTPPerTrade       = true;  // Take Profit per Trade
 input double InpTPMultiplier     = 1.0;   // TP = X x Spacing
 input bool   InpCloseAtMaxProfit = true;  // Close Grid at Max Profit
 input double InpMaxProfitMult    = 4.0;   // Max Profit = X x Spacing
-input double InpGridSLMult       = 6.0;   // Grid SL = X x Spacing
+input double InpGridSLMult       = 5.0;   // Grid SL = X x Spacing
 
 input group "====== TRAILING STOP ======"
 input bool   InpUseTrailing    = true;
@@ -58,8 +62,11 @@ input double InpTrailStartPips = 40;      // Trail activates after X pips
 input double InpTrailStepPips  = 20;      // Trail step in pips
 
 input group "====== DAILY LOSS PROTECTION ======"
+// IMPORTANT: Enter this value in YOUR account currency
+// USC (Cent account) : 500 = 500 USC = $5.00 USD (25% of 2000 USC)
+// USD (Real account) : 50  = $50 USD
 input bool   InpUseDailyLoss   = true;
-input double InpDailyLossUSD   = 50.0;   // Max daily loss in USD
+input double InpDailyLossAmt   = 500.0;  // Daily loss limit in account currency
 
 input group "====== ENTRY SIGNAL: RSI ======"
 input int                InpRSI_Period  = 14;
@@ -86,10 +93,10 @@ input int                InpExit_Shift      = 1;
 
 input group "====== GENERAL ======"
 input ulong  InpMagicNumber = 654321;
-input int    InpSlippage    = 50;   // Higher slippage for BTC compatibility
+input int    InpSlippage    = 50;
 
 //==========================================================================
-//  RUNTIME VARIABLES (set automatically based on symbol)
+//  GLOBAL VARIABLES
 //==========================================================================
 CTrade        trade;
 CPositionInfo posInfo;
@@ -99,7 +106,7 @@ int      rsi_handle;
 int      tf_fast_handle, tf_slow_handle;
 int      exit_fast_handle, exit_slow_handle;
 
-// These are the LIVE values used by the EA (auto-set or manual)
+// Live runtime values (auto-set or manual)
 double   g_spacingPips;
 int      g_gridSize;
 double   g_lotSize;
@@ -107,76 +114,92 @@ double   g_rsiBuyLvl;
 double   g_rsiSellLvl;
 double   g_trailStartPips;
 double   g_trailStepPips;
-double   g_dailyLossUSD;
+double   g_dailyLossAmt;     // In account currency (USC or USD)
 double   g_maxProfitMult;
 double   g_gridSLMult;
 
-// Computed point values
+// Computed distances
 double   g_spacingPoints;
 double   g_trailStartPoints;
 double   g_trailStepPoints;
 
-// Symbol detection
-bool     g_isBTC  = false;
-bool     g_isGold = false;
+// Symbol & account flags
+bool     g_isBTC        = false;
+bool     g_isGold       = false;
+bool     g_isCentAcct   = false;   // true = USC cent account
 
-datetime g_lastBarTime      = 0;
-datetime g_currentDay       = 0;
+datetime g_lastBarTime       = 0;
+datetime g_currentDay        = 0;
 double   g_dailyStartBalance = 0;
 
 //==========================================================================
-//  INIT — AUTO-DETECT SYMBOL AND APPLY CORRECT PRESET
+//  INIT
 //==========================================================================
 int OnInit()
 {
-   // --- Symbol Detection ---
+   //--- Symbol Detection
+   // Supports all Exness variants:
+   // XAUUSDc (cent), XAUUSDm (micro), XAUUSD (standard), XAUUSD. (raw)
+   // BTCUSDc (cent), BTCUSDm (micro), BTCUSD (standard)
    string sym = _Symbol;
    StringToUpper(sym);
-   g_isBTC  = (StringFind(sym, "BTC") >= 0);
-   g_isGold = (StringFind(sym, "XAU") >= 0 || StringFind(sym, "GOLD") >= 0);
+   g_isBTC  = (StringFind(sym, "BTC")  >= 0);
+   g_isGold = (StringFind(sym, "XAU")  >= 0 || StringFind(sym, "GOLD") >= 0);
+
+   //--- Account Currency Detection
+   // Exness cent accounts use "USC" as account currency
+   string accCurrency = AccountInfoString(ACCOUNT_CURRENCY);
+   StringToUpper(accCurrency);
+   g_isCentAcct = (StringFind(accCurrency, "USC") >= 0 ||
+                   StringFind(accCurrency, "CENT") >= 0 ||
+                   StringFind(sym, "C") == StringLen(sym)-1); // symbol ends in 'C'
+
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
 
    if(InpAutoDetect)
    {
       if(g_isBTC)
       {
          //==============================================
-         //  BTCUSD PRESET — optimized for Bitcoin M5
+         //  BTCUSD / BTCUSDc PRESET
          //==============================================
-         g_spacingPips    = 250;     // BTC moves $500-$2000/day — needs wider spacing
-         g_gridSize       = 5;       // 5 orders to reduce margin exposure
-         g_lotSize        = 0.001;   // Micro lot — BTC is very expensive per lot
-         g_rsiBuyLvl      = 30.0;    // Deeper oversold for BTC
-         g_rsiSellLvl     = 70.0;    // Deeper overbought for BTC
-         g_trailStartPips = 100.0;   // BTC needs wider trail activation
-         g_trailStepPips  = 50.0;    // BTC needs wider trail steps
-         g_dailyLossUSD   = 100.0;   // BTC swings bigger — allow more room
+         g_spacingPips    = 250;
+         g_gridSize       = g_isCentAcct ? 3    : 5;
+         g_lotSize        = g_isCentAcct ? 0.01 : 0.001;
+         g_rsiBuyLvl      = 30.0;
+         g_rsiSellLvl     = 70.0;
+         g_trailStartPips = 100.0;
+         g_trailStepPips  = 50.0;
+         // Daily loss: 25% of balance, capped reasonably
+         g_dailyLossAmt   = g_isCentAcct ? MathMin(balance * 0.25, 500.0) : 100.0;
          g_maxProfitMult  = 4.0;
-         g_gridSLMult     = 5.0;     // Tighter grid SL for BTC
-         Print(">>> AUTO-DETECT: BTCUSD preset applied.");
-         Print("    Spacing=250pips | Lot=0.001 | RSI=30/70 | GridSL=5x | DailyLoss=$100");
+         g_gridSLMult     = 5.0;
+
+         Print(">>> AUTO-DETECT: ", (g_isCentAcct ? "BTCUSDc CENT" : "BTCUSD STANDARD"), " preset applied.");
       }
       else if(g_isGold)
       {
          //==============================================
-         //  XAUUSD PRESET — optimized for Gold M5
+         //  XAUUSD / XAUUSDc PRESET
          //==============================================
          g_spacingPips    = 80;
-         g_gridSize       = 6;
-         g_lotSize        = 0.01;
+         g_gridSize       = g_isCentAcct ? 4    : 6;      // 4 orders on cent (safer)
+         g_lotSize        = g_isCentAcct ? 0.01 : 0.01;   // same lot — cent scales value down
          g_rsiBuyLvl      = 35.0;
          g_rsiSellLvl     = 65.0;
          g_trailStartPips = 40.0;
          g_trailStepPips  = 20.0;
-         g_dailyLossUSD   = 50.0;
+         // Daily loss: 25% of balance for cent, $50 for standard
+         // For 2000 USC account: 25% = 500 USC max daily loss
+         g_dailyLossAmt   = g_isCentAcct ? MathMin(balance * 0.25, 500.0) : 50.0;
          g_maxProfitMult  = 4.0;
-         g_gridSLMult     = 6.0;
-         Print(">>> AUTO-DETECT: XAUUSD (Gold) preset applied.");
-         Print("    Spacing=80pips | Lot=0.01 | RSI=35/65 | GridSL=6x | DailyLoss=$50");
+         g_gridSLMult     = g_isCentAcct ? 5.0 : 6.0;    // tighter SL for cent
+
+         Print(">>> AUTO-DETECT: ", (g_isCentAcct ? "XAUUSDc CENT ACCOUNT" : "XAUUSD STANDARD"), " preset applied.");
       }
       else
       {
-         // Unknown symbol — fall back to manual inputs
-         Print(">>> AUTO-DETECT: Unknown symbol '", _Symbol, "' — using manual input values.");
+         Print(">>> AUTO-DETECT: Unknown symbol '", _Symbol, "' — using manual values.");
          g_spacingPips    = InpSpacingPips;
          g_gridSize       = InpGridSize;
          g_lotSize        = InpLotSize;
@@ -184,14 +207,13 @@ int OnInit()
          g_rsiSellLvl     = InpRSI_SellLvl;
          g_trailStartPips = InpTrailStartPips;
          g_trailStepPips  = InpTrailStepPips;
-         g_dailyLossUSD   = InpDailyLossUSD;
+         g_dailyLossAmt   = InpDailyLossAmt;
          g_maxProfitMult  = InpMaxProfitMult;
          g_gridSLMult     = InpGridSLMult;
       }
    }
    else
    {
-      // Manual mode — use all input values as-is
       g_spacingPips    = InpSpacingPips;
       g_gridSize       = InpGridSize;
       g_lotSize        = InpLotSize;
@@ -199,23 +221,21 @@ int OnInit()
       g_rsiSellLvl     = InpRSI_SellLvl;
       g_trailStartPips = InpTrailStartPips;
       g_trailStepPips  = InpTrailStepPips;
-      g_dailyLossUSD   = InpDailyLossUSD;
+      g_dailyLossAmt   = InpDailyLossAmt;
       g_maxProfitMult  = InpMaxProfitMult;
       g_gridSLMult     = InpGridSLMult;
       Print(">>> MANUAL MODE: Using all input values as-is.");
    }
 
-   // Compute point-based distances (1 pip = 10 points for 2-decimal symbols)
+   // Compute point distances
    g_spacingPoints    = g_spacingPips    * 10.0 * _Point;
    g_trailStartPoints = g_trailStartPips * 10.0 * _Point;
    g_trailStepPoints  = g_trailStepPips  * 10.0 * _Point;
 
-   // Setup trade object
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpSlippage);
    trade.SetTypeFilling(ORDER_FILLING_IOC);
 
-   // Create indicator handles
    rsi_handle       = iRSI(_Symbol, PERIOD_CURRENT, InpRSI_Period, InpRSI_Price);
    tf_fast_handle   = iMA(_Symbol, PERIOD_CURRENT, InpTF_FastPeriod, 0, InpTF_FastMethod, InpTF_Price);
    tf_slow_handle   = iMA(_Symbol, PERIOD_CURRENT, InpTF_SlowPeriod, 0, InpTF_SlowMethod, InpTF_Price);
@@ -228,25 +248,37 @@ int OnInit()
       exit_fast_handle == INVALID_HANDLE ||
       exit_slow_handle == INVALID_HANDLE)
    {
-      Alert("EA v3.0 ERROR: Indicator handle creation failed!");
+      Alert("EA v3.2 ERROR: Indicator handle creation failed!");
       return INIT_FAILED;
    }
 
    g_dailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    g_currentDay        = GetDayStart();
 
-   Print("=== EA GRID v3.0 INITIALIZED on ", _Symbol, " ===");
-   Print("Grid: ", g_gridSize, " orders | Spacing: ", g_spacingPips,
-         " pips | Lot: ", g_lotSize,
-         " | RSI: ", g_rsiBuyLvl, "/", g_rsiSellLvl);
-   Print("Trail: ", g_trailStartPips, " pip start / ", g_trailStepPips, " pip step");
-   Print("Daily Loss Limit: $", g_dailyLossUSD, " | Max Profit: ", g_maxProfitMult,
-         "x | Grid SL: ", g_gridSLMult, "x");
+   // Print full account and settings summary
+   Print("=== EA GRID v3.2 INITIALIZED on ", _Symbol, " ===");
+   Print("Account Type : ", (g_isCentAcct ? "CENT ACCOUNT (USC)" : "STANDARD ACCOUNT (USD)"));
+   Print("Balance      : ", DoubleToString(balance, 2), " ", AccountInfoString(ACCOUNT_CURRENCY),
+         (g_isCentAcct ? " = $" + DoubleToString(balance/100.0, 2) + " USD real" : ""));
+   Print("Grid         : ", g_gridSize, " orders | Spacing: ", g_spacingPips, " pips | Lot: ", g_lotSize);
+   Print("RSI Levels   : BUY ", g_rsiBuyLvl, " / SELL ", g_rsiSellLvl);
+   Print("Daily Loss   : ", g_dailyLossAmt, " ", AccountInfoString(ACCOUNT_CURRENCY),
+         (g_isCentAcct ? " = $" + DoubleToString(g_dailyLossAmt/100.0, 2) + " USD" : ""));
+   Print("Max Profit   : ", g_maxProfitMult, "x | Grid SL: ", g_gridSLMult, "x");
+   Print("Trail        : Activates at ", g_trailStartPips, " pips | Step: ", g_trailStepPips, " pips");
 
+   if(g_isCentAcct)
+   {
+      Print("⚠ CENT ACCOUNT WARNING: 2000 USC = $20 USD real money.");
+      Print("  EA is configured conservatively to protect your capital.");
+      Print("  Max risk per grid cycle: ~", DoubleToString(g_gridSLMult * g_spacingPips * 0.1, 1),
+            " USC per lot");
+   }
+
+   if(g_isGold)
+      Print("Best PHT monitoring time: 8:00 PM – 11:00 PM (London + NY overlap)");
    if(g_isBTC)
-      Print("NOTE: BTCUSD trades 24/7 including weekends — EA will be active always.");
-   else
-      Print("NOTE: XAUUSD trades Mon–Fri only. Best PHT time: 8:00PM–11:00PM.");
+      Print("BTCUSD trades 24/7 — monitor anytime, best 8:00 PM – 12:00 AM PHT");
 
    return INIT_SUCCEEDED;
 }
@@ -276,14 +308,12 @@ void OnTick()
    if(currentBar == g_lastBarTime) return;
    g_lastBarTime = currentBar;
 
-   // Daily loss guard — pauses new entries only
    if(InpUseDailyLoss && IsDailyLossBreached())
    {
       Print("DAILY LOSS LIMIT reached — no new entries today.");
       return;
    }
 
-   // Load indicator buffers
    int bars = MathMax(MathMax(InpRSI_Shift, InpTF_Shift), InpExit_Shift) + 3;
 
    double rsi_val[], tf_fast[], tf_slow[], exit_fast[], exit_slow[];
@@ -302,9 +332,7 @@ void OnTick()
    bool hasBuys  = (CountPositions(POSITION_TYPE_BUY)  > 0);
    bool hasSells = (CountPositions(POSITION_TYPE_SELL) > 0);
 
-   //=========================================================
-   //  EXIT SIGNALS (checked only when positions are open)
-   //=========================================================
+   //--- Exit signals (only when positions open)
    if(hasBuys || hasSells)
    {
       int s = InpExit_Shift;
@@ -328,34 +356,27 @@ void OnTick()
       hasSells = (CountPositions(POSITION_TYPE_SELL) > 0);
    }
 
-   //=========================================================
-   //  TREND FILTER — EMA(100) vs EMA(300)
-   //=========================================================
+   //--- Trend filter
    int tf = InpTF_Shift;
    bool trendBullish = (tf_fast[tf] > tf_slow[tf]);
    bool trendBearish = (tf_fast[tf] < tf_slow[tf]);
 
-   //=========================================================
-   //  ENTRY SIGNALS — RSI Crossover (auto-adjusted levels)
-   //=========================================================
+   //--- Entry signals
    int rs = InpRSI_Shift;
    bool rsiBuySignal  = (rsi_val[rs] >  g_rsiBuyLvl  && rsi_val[rs+1] <= g_rsiBuyLvl);
    bool rsiSellSignal = (rsi_val[rs] <  g_rsiSellLvl && rsi_val[rs+1] >= g_rsiSellLvl);
 
-   //=========================================================
-   //  COMBINED ENTRY + FILTER
-   //=========================================================
+   //--- Combined entry
    if(rsiBuySignal && trendBullish && !hasBuys)
    {
-      Print("BUY ENTRY on ", _Symbol, ": RSI crossed UP through ", g_rsiBuyLvl,
-            " | UPTREND confirmed → Opening BUY Grid (", g_gridSize, " orders).");
+      Print("BUY ENTRY: RSI crossed UP through ", g_rsiBuyLvl,
+            " | UPTREND | Opening BUY Grid (", g_gridSize, " orders).");
       OpenBuyGrid();
    }
-
    if(rsiSellSignal && trendBearish && !hasSells)
    {
-      Print("SELL ENTRY on ", _Symbol, ": RSI crossed DOWN through ", g_rsiSellLvl,
-            " | DOWNTREND confirmed → Opening SELL Grid (", g_gridSize, " orders).");
+      Print("SELL ENTRY: RSI crossed DOWN through ", g_rsiSellLvl,
+            " | DOWNTREND | Opening SELL Grid (", g_gridSize, " orders).");
       OpenSellGrid();
    }
 }
@@ -457,18 +478,20 @@ void MonitorGridProfit()
    double tickSize    = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double pipValue    = (tickValue / tickSize) * (_Point * 10.0) * g_lotSize;
 
-   double maxProfitUSD =  g_maxProfitMult * g_spacingPips * pipValue;
-   double gridSL_USD   = -g_gridSLMult    * g_spacingPips * pipValue;
+   double maxProfitAmt =  g_maxProfitMult * g_spacingPips * pipValue;
+   double gridSL_Amt   = -g_gridSLMult    * g_spacingPips * pipValue;
 
-   if(InpCloseAtMaxProfit && totalProfit >= maxProfitUSD)
+   if(InpCloseAtMaxProfit && totalProfit >= maxProfitAmt)
    {
-      Print("MAX PROFIT HIT: $", DoubleToString(totalProfit, 2), " → Closing grid.");
+      Print("MAX PROFIT HIT: ", DoubleToString(totalProfit,2),
+            " ", AccountInfoString(ACCOUNT_CURRENCY), " → Closing grid.");
       CloseAllGridOrders();
       return;
    }
-   if(totalProfit <= gridSL_USD)
+   if(totalProfit <= gridSL_Amt)
    {
-      Print("GRID SL HIT: $", DoubleToString(totalProfit, 2), " → Closing grid.");
+      Print("GRID SL HIT: ", DoubleToString(totalProfit,2),
+            " ", AccountInfoString(ACCOUNT_CURRENCY), " → Closing grid.");
       CloseAllGridOrders();
    }
 }
@@ -491,17 +514,20 @@ void ResetDailyTracker()
    {
       g_currentDay        = today;
       g_dailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-      Print("New day — balance tracker reset to $", DoubleToString(g_dailyStartBalance, 2));
+      Print("New trading day — balance reset to ",
+            DoubleToString(g_dailyStartBalance, 2), " ",
+            AccountInfoString(ACCOUNT_CURRENCY));
    }
 }
 
 bool IsDailyLossBreached()
 {
    double lost = g_dailyStartBalance - AccountInfoDouble(ACCOUNT_BALANCE);
-   if(lost >= g_dailyLossUSD)
+   if(lost >= g_dailyLossAmt)
    {
-      Print("DAILY LOSS LIMIT: $", DoubleToString(lost, 2),
-            " lost (limit $", DoubleToString(g_dailyLossUSD, 2), ") — pausing entries.");
+      Print("DAILY LOSS LIMIT: Lost ", DoubleToString(lost,2),
+            " ", AccountInfoString(ACCOUNT_CURRENCY),
+            " (limit: ", DoubleToString(g_dailyLossAmt,2), ") — pausing entries.");
       return true;
    }
    return false;
@@ -559,5 +585,5 @@ void CloseAllGridOrders()
 }
 
 //+------------------------------------------------------------------+
-//| END OF EA v3.0                                                   |
+//| END OF EA v3.2                                                   |
 //+------------------------------------------------------------------+
