@@ -20,9 +20,6 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # ---------------------------------------------------------------
-    # Download MT5 with retries
-    # ---------------------------------------------------------------
     - name: Download MetaTrader 5 Installer
       shell: pwsh
       run: |
@@ -40,9 +37,6 @@ jobs:
           }
         }
 
-    # ---------------------------------------------------------------
-    # Install MT5, wait up to 120s for MetaEditor to appear
-    # ---------------------------------------------------------------
     - name: Install MetaTrader 5
       shell: pwsh
       run: |
@@ -65,7 +59,6 @@ jobs:
           Write-Host "Waiting for MetaEditor... ($elapsed/$timeout sec)"
         }
         if (-not $editorPath) {
-          Write-Host "Running deep search..."
           $found = Get-ChildItem "C:\" -Recurse -Filter "metaeditor64.exe" `
                                  -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($found) { $editorPath = $found.FullName }
@@ -80,77 +73,89 @@ jobs:
         echo "MT5_DIR=$installDir"    >> $env:GITHUB_ENV
 
     # ---------------------------------------------------------------
-    # Prepare MQL5 folders and resolve Trade/Trade.mqh
-    #
-    # Priority:
-    #   1. Official library from MT5 install dir  (best)
-    #   2. Deep search C:\ for Trade.mqh          (fallback)
-    #   3. Use Trade.mqh committed to this repo   (guaranteed)
+    # IMPORTANT: Repo stub is checked FIRST (Layer 1) — guaranteed
+    # to always be available, skips all slow fallbacks.
+    # Only falls back to MT5 install dir if stub is missing.
     # ---------------------------------------------------------------
     - name: Prepare MQL5 folder structure and Trade library
       shell: pwsh
       run: |
         $mql = "$env:APPDATA\MetaQuotes\Terminal\Common\MQL5"
-        New-Item -ItemType Directory -Force "$mql\Experts"      | Out-Null
+        New-Item -ItemType Directory -Force "$mql\Experts"       | Out-Null
         New-Item -ItemType Directory -Force "$mql\Include\Trade" | Out-Null
 
         $libraryReady = $false
 
-        # LAYER 1 — copy full Include\ from MT5 install dir
-        $stdLib = Join-Path $env:MT5_DIR "MQL5\Include"
-        if (Test-Path $stdLib) {
-          Write-Host "LAYER 1: Copying from $stdLib"
-          Copy-Item -Recurse -Force "$stdLib\*" "$mql\Include\"
+        # -------------------------------------------------------
+        # LAYER 1 — Repo-committed stub (FASTEST, always present)
+        # Path: .github/mql5-stub/Trade/Trade.mqh
+        # -------------------------------------------------------
+        $stubSrc = ".github\mql5-stub\Trade\Trade.mqh"
+        if (Test-Path $stubSrc) {
+          Write-Host "LAYER 1: Using repo-committed Trade.mqh stub..."
+          Copy-Item -Force $stubSrc "$mql\Include\Trade\Trade.mqh"
           if (Test-Path "$mql\Include\Trade\Trade.mqh") {
-            Write-Host "LAYER 1 SUCCESS."
+            Write-Host "LAYER 1 SUCCESS - Trade.mqh is ready."
             $libraryReady = $true
           }
+        } else {
+          Write-Warning "LAYER 1: Stub not found at $stubSrc"
         }
 
-        # LAYER 2 — deep search C:\ for any Trade.mqh
+        # -------------------------------------------------------
+        # LAYER 2 — Official MT5 install dir (no C:\ scan)
+        # -------------------------------------------------------
         if (-not $libraryReady) {
-          Write-Host "LAYER 2: Searching C:\ for Trade.mqh..."
-          $hits = Get-ChildItem "C:\" -Recurse -Filter "Trade.mqh" `
-                                -ErrorAction SilentlyContinue
-          if ($hits) {
-            $best = $hits | Where-Object { $_.FullName -match "MetaTrader|MQL5" } |
-                    Select-Object -First 1
-            if (-not $best) { $best = $hits | Select-Object -First 1 }
-            $tradeDir  = Split-Path $best.FullName
-            $includeDir= Split-Path $tradeDir
-            Write-Host "LAYER 2: Found at $($best.FullName)"
-            Copy-Item -Recurse -Force "$includeDir\*" "$mql\Include\" -ErrorAction SilentlyContinue
+          Write-Host "LAYER 2: Trying MT5 install directory..."
+          $stdLib = Join-Path $env:MT5_DIR "MQL5\Include"
+          if (Test-Path $stdLib) {
+            Write-Host "Copying from $stdLib"
+            Copy-Item -Recurse -Force "$stdLib\*" "$mql\Include\"
             if (Test-Path "$mql\Include\Trade\Trade.mqh") {
               Write-Host "LAYER 2 SUCCESS."
               $libraryReady = $true
             }
-          }
-        }
-
-        # LAYER 3 — use Trade.mqh committed to this repo (always available)
-        # File lives at: .github/mql5-stub/Trade/Trade.mqh
-        if (-not $libraryReady) {
-          $stubSrc = ".github\mql5-stub\Trade\Trade.mqh"
-          if (Test-Path $stubSrc) {
-            Write-Host "LAYER 3: Using repo-committed Trade.mqh stub."
-            Copy-Item -Force $stubSrc "$mql\Include\Trade\Trade.mqh"
-            if (Test-Path "$mql\Include\Trade\Trade.mqh") {
-              Write-Host "LAYER 3 SUCCESS."
-              $libraryReady = $true
-            }
           } else {
-            Write-Warning "LAYER 3: Stub not found at $stubSrc — did you commit it?"
+            Write-Warning "LAYER 2: MT5 standard library not found at $stdLib"
           }
         }
 
-        # Final check
+        # -------------------------------------------------------
+        # LAYER 3 — Targeted search (only Trade folder, not C:\)
+        # -------------------------------------------------------
+        if (-not $libraryReady) {
+          Write-Host "LAYER 3: Targeted search for Trade.mqh..."
+          $searchRoots = @(
+            "C:\Program Files\MetaTrader 5",
+            "$env:LOCALAPPDATA\Programs\MetaTrader 5",
+            "$env:APPDATA\MetaQuotes"
+          )
+          foreach ($root in $searchRoots) {
+            if (-not (Test-Path $root)) { continue }
+            $hit = Get-ChildItem $root -Recurse -Filter "Trade.mqh" `
+                                  -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($hit) {
+              $tradeDir   = Split-Path $hit.FullName
+              $includeDir = Split-Path $tradeDir
+              Write-Host "Found at: $($hit.FullName)"
+              Copy-Item -Recurse -Force "$includeDir\*" "$mql\Include\" -ErrorAction SilentlyContinue
+              if (Test-Path "$mql\Include\Trade\Trade.mqh") {
+                Write-Host "LAYER 3 SUCCESS."
+                $libraryReady = $true
+                break
+              }
+            }
+          }
+        }
+
+        # Final check — should never reach here if stub is committed
         if (-not (Test-Path "$mql\Include\Trade\Trade.mqh")) {
-          Write-Error "FATAL: Trade\Trade.mqh could not be provided by any method."
+          Write-Error "FATAL: Trade\Trade.mqh could not be provided."
           exit 1
         }
-        Write-Host "Trade\Trade.mqh is ready."
+        Write-Host "Trade\Trade.mqh confirmed ready."
 
-        # Copy EA source — auto-detect .mq5 in repo root
+        # Auto-detect EA .mq5 in repo root
         $ea = Get-ChildItem "." -Filter "*.mq5" | Select-Object -First 1
         if (-not $ea) {
           Write-Error "No .mq5 file found in repo root."
@@ -163,9 +168,6 @@ jobs:
         echo "EA_NAME=$($ea.Name)"     >> $env:GITHUB_ENV
         echo "EA_BASE=$($ea.BaseName)" >> $env:GITHUB_ENV
 
-    # ---------------------------------------------------------------
-    # Compile — /log must be an absolute path
-    # ---------------------------------------------------------------
     - name: Compile EA with MetaEditor
       shell: pwsh
       run: |
@@ -185,9 +187,6 @@ jobs:
           Write-Warning "No compile log produced."
         }
 
-    # ---------------------------------------------------------------
-    # Parse results — line-by-line only, no complex regex in YAML
-    # ---------------------------------------------------------------
     - name: Parse Compile Results
       shell: pwsh
       run: |
@@ -232,9 +231,6 @@ jobs:
         }
         Write-Host "SUCCESS - Compiled with no errors."
 
-    # ---------------------------------------------------------------
-    # Find the .ex5 and stage it for upload
-    # ---------------------------------------------------------------
     - name: Find and collect EX5
       shell: pwsh
       run: |
