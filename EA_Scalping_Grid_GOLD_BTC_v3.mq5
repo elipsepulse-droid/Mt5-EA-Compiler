@@ -10,9 +10,9 @@
 //|   - Active trades count and floating P/L                         |
 //|   - Lot size fully editable from inputs                          |
 //+------------------------------------------------------------------+
-#property copyright   "EA SCALPING ROBOT / DANE - v3.5"
-#property version     "3.50"
-#property description "Grid EA v3.5 — Orphan Fix + Debug Logger"
+#property copyright   "EA SCALPING ROBOT / DANE - v3.6"
+#property version     "3.60"
+#property description "Grid EA v3.6 — Balance Fix + RSI 30/70 + Debug"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -44,16 +44,12 @@ input bool   InpUseTrailing    = true;
 input double InpTrailStartPips = 40;
 input double InpTrailStepPips  = 20;
 
-input group "====== DAILY LOSS PROTECTION ======"
-input bool   InpUseDailyLoss   = true;
-input double InpDailyLossAmt   = 500.0; // In YOUR account currency (USC or USD)
-
 input group "====== ENTRY SIGNAL: RSI ======"
 input int                InpRSI_Period  = 14;
 input ENUM_APPLIED_PRICE InpRSI_Price   = PRICE_CLOSE;
 input int                InpRSI_Shift   = 1;
-input double             InpRSI_BuyLvl  = 35.0;
-input double             InpRSI_SellLvl = 65.0;
+input double             InpRSI_BuyLvl  = 30.0;   // RSI BUY  level — wider = more signals
+input double             InpRSI_SellLvl = 70.0;   // RSI SELL level — wider = more signals
 
 input group "====== TREND FILTER: Two EMAs ======"
 input int                InpTF_FastPeriod = 100;
@@ -99,7 +95,6 @@ double   g_rsiBuyLvl;
 double   g_rsiSellLvl;
 double   g_trailStartPips;
 double   g_trailStepPips;
-double   g_dailyLossAmt;
 double   g_maxProfitMult;
 double   g_gridSLMult;
 
@@ -150,7 +145,6 @@ int OnInit()
          g_rsiSellLvl     = 70.0;
          g_trailStartPips = 100.0;
          g_trailStepPips  = 50.0;
-         g_dailyLossAmt   = g_isCentAcct ? MathMin(balance*0.25, 500.0) : 100.0;
          g_maxProfitMult  = 4.0;
          g_gridSLMult     = 5.0;
       }
@@ -158,12 +152,11 @@ int OnInit()
       {
          g_spacingPips    = 80;
          g_gridSize       = g_isCentAcct ? 4 : 6;
-         g_lotSize        = InpLotSize;   // Always use editable input lot
-         g_rsiBuyLvl      = 35.0;
-         g_rsiSellLvl     = 65.0;
+         g_lotSize        = InpLotSize;
+         g_rsiBuyLvl      = 30.0;
+         g_rsiSellLvl     = 70.0;
          g_trailStartPips = 40.0;
          g_trailStepPips  = 20.0;
-         g_dailyLossAmt   = g_isCentAcct ? MathMin(balance*0.25, 500.0) : 50.0;
          g_maxProfitMult  = 4.0;
          g_gridSLMult     = g_isCentAcct ? 5.0 : 6.0;
       }
@@ -176,7 +169,6 @@ int OnInit()
          g_rsiSellLvl     = InpRSI_SellLvl;
          g_trailStartPips = InpTrailStartPips;
          g_trailStepPips  = InpTrailStepPips;
-         g_dailyLossAmt   = InpDailyLossAmt;
          g_maxProfitMult  = InpMaxProfitMult;
          g_gridSLMult     = InpGridSLMult;
       }
@@ -190,7 +182,6 @@ int OnInit()
       g_rsiSellLvl     = InpRSI_SellLvl;
       g_trailStartPips = InpTrailStartPips;
       g_trailStepPips  = InpTrailStepPips;
-      g_dailyLossAmt   = InpDailyLossAmt;
       g_maxProfitMult  = InpMaxProfitMult;
       g_gridSLMult     = InpGridSLMult;
    }
@@ -233,22 +224,36 @@ int OnInit()
    if(rsi_handle==INVALID_HANDLE || tf_fast_handle==INVALID_HANDLE ||
       tf_slow_handle==INVALID_HANDLE || exit_fast_handle==INVALID_HANDLE ||
       exit_slow_handle==INVALID_HANDLE)
-   { Alert("EA v3.3 ERROR: Indicator handle failed!"); return INIT_FAILED; }
+   { Alert("EA v3.6 ERROR: Indicator handle failed!"); return INIT_FAILED; }
 
-   g_dailyStartBalance  = balance;
-   g_weeklyStartBalance = balance;
+   // --- Safe balance initialization ---
+   // Problem: AccountInfoDouble(ACCOUNT_BALANCE) can return 0.00 if called
+   // before the terminal finishes loading account data after attach.
+   // Fix: retry up to 10 times with 100ms pause until we get a valid balance.
+   double safeBalance = 0;
+   for(int attempt = 0; attempt < 10; attempt++)
+   {
+      safeBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      if(safeBalance > 0) break;
+      Sleep(100); // wait 100ms and try again
+   }
+   // If still 0 after retries (shouldn't happen), use equity as fallback
+   if(safeBalance <= 0)
+      safeBalance = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   g_dailyStartBalance  = safeBalance;
+   g_weeklyStartBalance = safeBalance;
    g_currentDay         = GetDayStart();
    g_currentWeek        = GetWeekStart();
 
    if(InpShowDashboard) CreateDashboard();
 
-   Print("=== EA GRID v3.5 INITIALIZED on ", _Symbol, " ===");
+   Print("=== EA GRID v3.6 INITIALIZED on ", _Symbol, " ===");
    Print("Account: ", (g_isCentAcct ? "CENT (USC)" : "STANDARD (USD)"),
-         " | Balance: ", DoubleToString(balance,2), " ", g_currency);
+         " | Balance: ", DoubleToString(safeBalance,2), " ", g_currency);
    Print("Lot: ", g_lotSize, " | Grid: ", g_gridSize,
          " orders | Spacing: ", g_spacingPips, " pips");
-   Print("RSI: ", g_rsiBuyLvl, "/", g_rsiSellLvl,
-         " | Daily Loss Limit: ", g_dailyLossAmt, " ", g_currency);
+   Print("RSI: ", g_rsiBuyLvl, "/", g_rsiSellLvl, " | Daily Loss Protection: DISABLED (demo mode)");
 
    return INIT_SUCCEEDED;
 }
@@ -283,7 +288,7 @@ void OnTick()
    if(currentBar == g_lastBarTime) return;
    g_lastBarTime = currentBar;
 
-   if(InpUseDailyLoss && IsDailyLossBreached()) return;
+   // Daily loss protection removed — EA trades freely all day
 
    // Use 10 bars minimum — safer buffer for all indicator calculations
    // EMA(300) needs 300 bars to warm up; CopyBuffer only needs recent values
@@ -463,14 +468,6 @@ void ResetDailyTracker()
    }
 }
 
-bool IsDailyLossBreached()
-{
-   double lost = g_dailyStartBalance - AccountInfoDouble(ACCOUNT_BALANCE);
-   if(lost >= g_dailyLossAmt)
-   { Print("DAILY LOSS LIMIT: pausing entries."); return true; }
-   return false;
-}
-
 //==========================================================================
 //  ██████╗  █████╗ ███████╗██╗  ██╗██████╗  ██████╗  █████╗ ██████╗ ██████╗ 
 //  ██╔══██╗██╔══██╗██╔════╝██║  ██║██╔══██╗██╔═══██╗██╔══██╗██╔══██╗██╔══██╗
@@ -492,7 +489,7 @@ void CreateDashboard()
    
    // Title bar
    DashRect("TITLE_BG", x,   y,    w,   36, C'0,100,140',  C'0,120,160', 0);
-   DashLabel("TITLE",   x+10, y+8,  "⚡ DANE GRID EA v3.5",  13, clrWhite,    true);
+   DashLabel("TITLE",   x+10, y+8,  "⚡ DANE GRID EA v3.6",  13, clrWhite,    true);
    DashLabel("VERSION", x+220,y+10, "by Dane",               9,  clrAqua,    false);
 
    // Account type badge
