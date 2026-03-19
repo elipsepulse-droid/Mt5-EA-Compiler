@@ -1,18 +1,18 @@
 //+------------------------------------------------------------------+
-//|         EA_Scalping_Grid_GOLD_BTC_v3.7.mq5                       |
+//|         EA_Scalping_Grid_GOLD_BTC_v3.8.mq5                       |
 //|     Universal Grid Scalping Robot - XAUUSD & BTCUSD M5           |
 //|                                                                  |
-//|  v3.7: Live Dashboard + Smart Bypass Panel on chart showing:                |
-//|   - Daily Profit (% and USC/USD)                                 |
-//|   - Weekly Profit (% and USC/USD)                                |
-//|   - Account type (USC cent or USD standard)                      |
-//|   - Current EA settings (grid, spacing, lot, RSI)               |
-//|   - Active trades count and floating P/L                         |
-//|   - Lot size fully editable from inputs                          |
+//|  v3.8 CHANGES:                                                   |
+//|  - RSI changed to 40/60 for more frequent trades                 |
+//|  - Early Grid Exit added: closes entire grid if total floating   |
+//|    loss hits -$0.05 USD (or -5 USC on cent account)              |
+//|  - Early exit applies to ALL symbols (XAUUSD, BTCUSD)           |
+//|  - Early exit works on both USD and USC cent accounts            |
+//|  - Dashboard updated to show Early Exit threshold                |
 //+------------------------------------------------------------------+
-#property copyright   "EA SCALPING ROBOT / DANE - v3.7"
-#property version     "3.70"
-#property description "Grid EA v3.7 — Option 1 Smart Bypass | No Daily Loss Limit"
+#property copyright   "EA SCALPING ROBOT / DANE - v3.8"
+#property version     "3.80"
+#property description "Grid EA v3.8 — RSI 40/60 + Early Grid Exit Protection"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -48,8 +48,18 @@ input group "====== ENTRY SIGNAL: RSI ======"
 input int                InpRSI_Period  = 14;
 input ENUM_APPLIED_PRICE InpRSI_Price   = PRICE_CLOSE;
 input int                InpRSI_Shift   = 1;
-input double             InpRSI_BuyLvl  = 30.0;   // RSI BUY  level — wider = more signals
-input double             InpRSI_SellLvl = 70.0;   // RSI SELL level — wider = more signals
+input double             InpRSI_BuyLvl  = 40.0;   // RSI BUY  level (40 = more frequent trades)
+input double             InpRSI_SellLvl = 60.0;   // RSI SELL level (60 = more frequent trades)
+
+input group "====== EARLY GRID EXIT PROTECTION (NEW v3.8) ======"
+// Closes the ENTIRE grid immediately when total floating loss hits this amount
+// Applies to ALL symbols (XAUUSD, BTCUSD) on both USD and USC accounts
+// USD account example: 0.05 = close grid if total loss reaches -$0.05
+// USC account example: 0.05 = close grid if total loss reaches -0.05 USC (= -$0.0005 real)
+// Set higher for USC accounts e.g. 5.0 USC — see recommended values below
+input bool   InpUseEarlyExit     = true;  // Enable early grid exit protection
+input double InpEarlyExitLossUSD = 0.05;  // USD accounts: early exit at -$0.05 loss
+input double InpEarlyExitLossUSC = 5.0;   // USC cent accounts: early exit at -5 USC loss
 
 input group "====== OPTION 1 — EXTREME RSI TREND BYPASS ======"
 // When RSI reaches extreme levels, trend filter is ignored automatically
@@ -104,6 +114,7 @@ double   g_trailStartPips;
 double   g_trailStepPips;
 double   g_maxProfitMult;
 double   g_gridSLMult;
+double   g_earlyExitLoss;    // Early exit threshold in account currency (USC or USD)
 
 double   g_spacingPoints;
 double   g_trailStartPoints;
@@ -146,26 +157,28 @@ int OnInit()
       if(g_isBTC)
       {
          g_spacingPips    = 250;
-         g_gridSize       = g_isCentAcct ? 3    : 5;
-         g_lotSize        = InpLotSize;   // Always use editable input lot
-         g_rsiBuyLvl      = 30.0;
-         g_rsiSellLvl     = 70.0;
+         g_gridSize       = g_isCentAcct ? 3 : 5;
+         g_lotSize        = InpLotSize;
+         g_rsiBuyLvl      = 40.0;   // v3.8: 40/60 for more frequent trades
+         g_rsiSellLvl     = 60.0;
          g_trailStartPips = 100.0;
          g_trailStepPips  = 50.0;
          g_maxProfitMult  = 4.0;
          g_gridSLMult     = 5.0;
+         g_earlyExitLoss  = g_isCentAcct ? InpEarlyExitLossUSC : InpEarlyExitLossUSD;
       }
       else if(g_isGold)
       {
          g_spacingPips    = 80;
          g_gridSize       = g_isCentAcct ? 4 : 6;
          g_lotSize        = InpLotSize;
-         g_rsiBuyLvl      = 30.0;
-         g_rsiSellLvl     = 70.0;
+         g_rsiBuyLvl      = 40.0;   // v3.8: 40/60 for more frequent trades
+         g_rsiSellLvl     = 60.0;
          g_trailStartPips = 40.0;
          g_trailStepPips  = 20.0;
          g_maxProfitMult  = 4.0;
          g_gridSLMult     = g_isCentAcct ? 5.0 : 6.0;
+         g_earlyExitLoss  = g_isCentAcct ? InpEarlyExitLossUSC : InpEarlyExitLossUSD;
       }
       else
       {
@@ -178,6 +191,7 @@ int OnInit()
          g_trailStepPips  = InpTrailStepPips;
          g_maxProfitMult  = InpMaxProfitMult;
          g_gridSLMult     = InpGridSLMult;
+         g_earlyExitLoss  = g_isCentAcct ? InpEarlyExitLossUSC : InpEarlyExitLossUSD;
       }
    }
    else
@@ -191,6 +205,7 @@ int OnInit()
       g_trailStepPips  = InpTrailStepPips;
       g_maxProfitMult  = InpMaxProfitMult;
       g_gridSLMult     = InpGridSLMult;
+      g_earlyExitLoss  = g_isCentAcct ? InpEarlyExitLossUSC : InpEarlyExitLossUSD;
    }
 
    // ---------------------------------------------------------------
@@ -255,14 +270,15 @@ int OnInit()
 
    if(InpShowDashboard) CreateDashboard();
 
-   Print("=== EA GRID v3.7 INITIALIZED on ", _Symbol, " ===");
-   Print("Account: ", (g_isCentAcct ? "CENT (USC)" : "STANDARD (USD)"),
+   Print("=== EA GRID v3.8 INITIALIZED on ", _Symbol, " ===");
+   Print("Account : ", (g_isCentAcct ? "CENT (USC)" : "STANDARD (USD)"),
          " | Balance: ", DoubleToString(safeBalance,2), " ", g_currency);
-   Print("Lot: ", g_lotSize, " | Grid: ", g_gridSize,
-         " orders | Spacing: ", g_spacingPips, " pips");
-   Print("RSI: ", g_rsiBuyLvl, "/", g_rsiSellLvl, " | Daily Loss Protection: DISABLED (demo mode)");
-   Print("Option 1 Bypass: ACTIVE — Extreme RSI Low=", InpExtremeRSILow,
-         " / High=", InpExtremeRSIHigh, " (trend filter auto-disabled at these levels)");
+   Print("Symbol  : ", _Symbol, " | Grid: ", g_gridSize,
+         " orders | Spacing: ", g_spacingPips, " pips | Lot: ", g_lotSize);
+   Print("RSI     : BUY=", g_rsiBuyLvl, " SELL=", g_rsiSellLvl,
+         " | Bypass: <", InpExtremeRSILow, " / >", InpExtremeRSIHigh);
+   Print("Early Exit : ENABLED at -", DoubleToString(g_earlyExitLoss,2), " ", g_currency,
+         " | Max Profit: ", g_maxProfitMult, "x | Grid SL: ", g_gridSLMult, "x");
 
    return INIT_SUCCEEDED;
 }
@@ -467,20 +483,60 @@ void ManageTrailingStop()
 }
 
 //==========================================================================
-//  GRID PROFIT MONITOR
+//  GRID PROFIT MONITOR — includes Early Grid Exit (v3.8)
+//  3 layers of protection in priority order:
+//  1. EARLY EXIT  : total floating loss hits -$0.05 USD / -5 USC → instant close
+//  2. MAX PROFIT  : total floating profit hits 4x spacing → close and take profit
+//  3. GRID SL     : total floating loss hits 5x/6x spacing → last resort close
 //==========================================================================
 void MonitorGridProfit()
 {
    if(CountPositions(POSITION_TYPE_BUY)==0 && CountPositions(POSITION_TYPE_SELL)==0) return;
-   double tp=GetTotalGridProfit();
-   // Use tick value directly with g_spacingPoints for accurate cent/standard calculation
-   double tv  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double ts  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double pv  = (tv / ts) * g_spacingPoints * g_lotSize; // value of 1 spacing move
-   double maxP=  g_maxProfitMult * pv;
-   double maxL= -g_gridSLMult    * pv;
-   if(InpCloseAtMaxProfit && tp>=maxP){ Print("MAX PROFIT → closing grid."); CloseAllGridOrders(); return; }
-   if(tp<=maxL){ Print("GRID SL → closing grid."); CloseAllGridOrders(); }
+
+   double totalPnL = GetTotalGridProfit();
+
+   // ------------------------------------------------------------------
+   // LAYER 1 — EARLY EXIT (NEW v3.8)
+   // Closes entire grid immediately when floating loss hits threshold
+   // Works on ALL symbols (XAUUSD, BTCUSD) and ALL account types (USD, USC)
+   // USD account: -$0.05 | USC account: -5 USC
+   // ------------------------------------------------------------------
+   if(InpUseEarlyExit && totalPnL <= -g_earlyExitLoss)
+   {
+      Print("⚡ EARLY EXIT TRIGGERED: Floating loss = ",
+            DoubleToString(totalPnL, 2), " ", g_currency,
+            " | Threshold = -", DoubleToString(g_earlyExitLoss, 2), " ", g_currency,
+            " | Closing entire grid to protect account.");
+      CloseAllGridOrders();
+      return;
+   }
+
+   // ------------------------------------------------------------------
+   // LAYER 2 — MAX PROFIT TARGET
+   // ------------------------------------------------------------------
+   double tv   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double ts   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double pv   = (tv / ts) * g_spacingPoints * g_lotSize;
+   double maxP =  g_maxProfitMult * pv;
+   double maxL = -g_gridSLMult    * pv;
+
+   if(InpCloseAtMaxProfit && totalPnL >= maxP)
+   {
+      Print("✅ MAX PROFIT HIT: ", DoubleToString(totalPnL,2), " ",
+            g_currency, " → Closing grid.");
+      CloseAllGridOrders();
+      return;
+   }
+
+   // ------------------------------------------------------------------
+   // LAYER 3 — GRID STOP LOSS (last resort)
+   // ------------------------------------------------------------------
+   if(totalPnL <= maxL)
+   {
+      Print("🛑 GRID SL HIT: ", DoubleToString(totalPnL,2), " ",
+            g_currency, " → Closing grid.");
+      CloseAllGridOrders();
+   }
 }
 
 //==========================================================================
@@ -536,7 +592,7 @@ void CreateDashboard()
 
    // Title bar
    DashRect("TITLE_BG",  x,   y,    w,   36, C'0,90,130',   C'0,140,180', 0);
-   DashLabel("TITLE",    x+10, y+8,  "⚡ DANE GRID EA v3.7",  13, clrWhite, true);
+   DashLabel("TITLE",    x+10, y+8,  "⚡ DANE GRID EA v3.8",  13, clrWhite, true);
    DashLabel("BY",       x+218,y+10, "by Dane",                9, clrAqua,  false);
 
    // Account badge
