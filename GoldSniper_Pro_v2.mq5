@@ -86,6 +86,11 @@ input group "====== IMPROVEMENT 6: BREAKEVEN STOP ======"
 input bool   InpUseBreakeven     = true;
 input double InpBreakevenPips    = 20.0; // Move SL to entry after 20 pips profit
 
+input group "====== TRAILING STOP ======"
+input bool   InpUseTrailing      = true;  // Enable trailing stop
+input double InpTrailStartPips   = 40.0;  // Trail activates after X pips profit
+input double InpTrailStepPips    = 20.0;  // Trail step size in pips
+
 input group "====== IMPROVEMENT 7: DYNAMIC LOT SIZING ======"
 // When ON  → lot auto-calculated from balance % but capped by InpMinLot and InpMaxLot
 // When OFF → EA uses InpLotSize exactly — full manual control
@@ -276,9 +281,10 @@ int OnInit()
    else                       pipSize = _Point*10.0;
 
    g_spacingPoints    = g_spacingPips    * pipSize;
-   g_trailStartPoints = g_trailStartPips * pipSize;
-   g_trailStepPoints  = g_trailStepPips  * pipSize;
-   g_breakevenPoints  = InpBreakevenPips * pipSize;
+   // Use InpTrailStartPips/InpTrailStepPips from inputs — overrides preset defaults
+   g_trailStartPoints = InpTrailStartPips * pipSize;
+   g_trailStepPoints  = InpTrailStepPips  * pipSize;
+   g_breakevenPoints  = InpBreakevenPips  * pipSize;
 
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpSlippage);
@@ -801,6 +807,7 @@ void ManagePartialTP()
 //==========================================================================
 void ManageTrailingStop()
 {
+   if(!InpUseTrailing) return;
    if(g_trailStartPoints <= 0) return;
    for(int i=PositionsTotal()-1; i>=0; i--)
    {
