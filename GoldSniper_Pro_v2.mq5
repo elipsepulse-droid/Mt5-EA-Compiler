@@ -41,17 +41,23 @@
 //  INPUTS
 //==========================================================================
 
+input group "====== ★ LOT SIZE QUICK CONTROL ★ ======"
+// ★ THIS IS THE FIRST THING YOU SEE — Change lot size here easily ★
+// STEP 1: Choose your mode below
+// STEP 2a (MANUAL): Set InpUseDynamicLot=false → change InpLotSize to your desired lot
+// STEP 2b (AUTO):   Set InpUseDynamicLot=true  → EA calculates lot from your balance %
+input bool   InpUseDynamicLot  = true;   // true=AUTO lot | false=MANUAL lot
+input double InpLotSize        = 0.01;   // ← MANUAL LOT: change this (only used when AUTO=false)
+input double InpRiskPercent    = 1.0;    // ← AUTO LOT: risk % per grid (only used when AUTO=true)
+input double InpMinLot         = 0.01;   // Auto lot minimum cap
+input double InpMaxLot         = 1.00;   // Auto lot maximum cap
+
 input group "====== SYMBOL MODE ======"
 input bool InpAutoDetect = true;
 
 input group "====== GRID SETUP ======"
 input int    InpGridSize       = 4;
 input double InpSpacingPips    = 80;
-// *** LOT SIZE — HOW TO USE ***
-// If InpUseDynamicLot = false → EA uses EXACTLY this lot size every trade
-// If InpUseDynamicLot = true  → EA auto-calculates lot but respects InpMinLot/InpMaxLot below
-// You can change this anytime in EA Properties → Inputs without recompiling
-input double InpLotSize        = 0.01; // Manual lot size (used when dynamic lot is OFF)
 input bool   InpMoveGrid       = true;
 
 input group "====== TRADE MANAGEMENT ======"
@@ -92,13 +98,8 @@ input double InpTrailStartPips   = 40.0;  // Trail activates after X pips profit
 input double InpTrailStepPips    = 20.0;  // Trail step size in pips
 
 input group "====== IMPROVEMENT 7: DYNAMIC LOT SIZING ======"
-// When ON  → lot auto-calculated from balance % but capped by InpMinLot and InpMaxLot
-// When OFF → EA uses InpLotSize exactly — full manual control
-input bool   InpUseDynamicLot    = true;
-input double InpRiskPercent      = 1.0;   // Risk % of balance per grid (used when dynamic ON)
-input double InpMinLot           = 0.01;  // Minimum lot even if dynamic calc says lower
-input double InpMaxLot           = 1.00;  // Maximum lot even if dynamic calc says higher
-// TIP: Set InpUseDynamicLot=false and change InpLotSize anytime to trade any size you want
+// Lot size is controlled at the TOP of inputs — ★ LOT SIZE QUICK CONTROL ★
+// No settings here — scroll to top to change lot size
 
 input group "====== IMPROVEMENT 8: VOLUME FILTER ======"
 input bool   InpUseVolFilter     = true;
@@ -981,56 +982,83 @@ void CloseAllGridOrders()
 }
 
 //==========================================================================
-//  DASHBOARD — CLEAN MINIMAL 3-ROW VERSION
-//  620px wide x 78px tall — leaves chart visible
-//  Row 1: Title | Account | Mode | RSI | Status
-//  Row 2: Daily P/L | Weekly P/L | Buys | Sells | Float P/L
-//  Row 3: Lot | Spacing | RSI | MaxP | SL | Spread | ADX
+//  DASHBOARD — SQUARE LEFT SIDE VERSION
+//  460px wide x 340px tall — sits on left half of chart
+//  Big readable text — all values clearly visible
 //==========================================================================
 void CreateDashboard()
 {
    DeleteDashboard();
-   int x=InpDashX, y=InpDashY, w=620, h=78;
+   int x = InpDashX;   // default 10 = left side
+   int y = InpDashY;   // default 20 = top
+   int w = 460;        // half chart width
+   int h = 340;        // square-ish height
 
-   DashRect("BG",      x,y,    w,h,  C'18,36,48', C'0,120,160', 2);
-   DashRect("R1",      x,y,    w,26, C'0,90,130',  C'0,140,180', 0);
-   DashLabel("TITLE",  x+8,  y+7,  "⚡ DANE GRID EA v3.9", 10, clrWhite,  true);
-   DashRect("ACC_BG",  x+195,y+4,  90,18, C'0,55,85',C'0,160,200',1);
-   DashLabel("ACC_TYPE",x+199,y+7, "LOADING...",           8,  clrYellow, false);
-   DashLabel("MD_L",   x+295,y+7,  "Mode:",  8, clrSilver, false);
-   DashLabel("MODE_V", x+330,y+7,  "NORMAL", 8, clrLime,   true);
-   DashLabel("RI_L",   x+450,y+7,  "RSI:",   8, clrSilver, false);
-   DashLabel("RSI_V",  x+475,y+7,  "--",     8, clrWhite,  true);
-   DashLabel("ST_L",   x+515,y+7,  "Status:",8, clrSilver, false);
-   DashLabel("STA_V",  x+560,y+7,  "READY",  8, clrLime,   true);
+   // === MAIN BACKGROUND ===
+   DashRect("BG",     x,   y,    w, h,   C'15,30,45',  C'0,120,160', 2);
 
-   DashRect("R2",      x,y+26, w,26, C'12,28,40', C'0,100,140', 0);
-   DashLabel("D_L",    x+8,  y+33, "Daily:",   8, C'0,200,220', false);
-   DashLabel("D_VAL",  x+48, y+33, "0.00%|0.00",9,clrWhite,    false);
-   DashLabel("W_L",    x+165,y+33, "Weekly:",  8, C'0,200,220', false);
-   DashLabel("W_VAL",  x+210,y+33, "0.00%|0.00",9,clrWhite,    false);
-   DashLabel("TB_L",   x+325,y+33, "Buys:",    8, clrSilver,   false);
-   DashLabel("T_BUY_V",x+360,y+33, "0",        9, clrLime,     true);
-   DashLabel("TS_L",   x+385,y+33, "Sells:",   8, clrSilver,   false);
-   DashLabel("T_SEL_V",x+422,y+33, "0",        9, clrRed,      true);
-   DashLabel("PL_L",   x+450,y+33, "Float:",   8, clrSilver,   false);
-   DashLabel("T_PL_V", x+485,y+33, "+0.00",    9, clrLime,     true);
+   // === TITLE ROW (height 38) ===
+   DashRect("R_TTL",  x,   y,    w, 38,  C'0,85,125',  C'0,150,190', 0);
+   DashLabel("TITLE", x+10,y+10, "⚡ DANE GRID EA v3.9", 12, clrWhite, true);
+   DashRect("ACC_BG", x+w-110,y+7,102,24,C'0,55,85',C'0,180,220',1);
+   DashLabel("ACC_TYPE",x+w-106,y+12,"LOADING...", 9, clrYellow, false);
 
-   DashRect("R3",      x,y+52, w,26, C'10,24,36', C'0,100,140', 0);
-   DashLabel("S_LOT",  x+8,  y+59, "Lot:",     8, clrSilver, false);
-   DashLabel("S_LV",   x+35, y+59, "--",        8, clrYellow, true);
-   DashLabel("S_SP",   x+140,y+59, "Spacing:", 8, clrSilver, false);
-   DashLabel("S_SV",   x+195,y+59, "--",        8, clrYellow, false);
-   DashLabel("S_RSI",  x+245,y+59, "RSI:",     8, clrSilver, false);
-   DashLabel("S_RV",   x+270,y+59, "--",        8, clrYellow, false);
-   DashLabel("S_MP",   x+315,y+59, "MaxP:",    8, clrSilver, false);
-   DashLabel("S_MV",   x+350,y+59, "--",        8, clrYellow, false);
-   DashLabel("S_SL",   x+385,y+59, "SL:",      8, clrSilver, false);
-   DashLabel("S_SLV",  x+400,y+59, "--",        8, clrYellow, false);
-   DashLabel("S_SPR",  x+440,y+59, "Spread:",  8, clrSilver, false);
-   DashLabel("S_SPRV", x+485,y+59, "--",        8, clrWhite,  false);
-   DashLabel("S_ADX",  x+535,y+59, "ADX:",     8, clrSilver, false);
-   DashLabel("S_ADXV", x+560,y+59, "--",        8, clrWhite,  false);
+   // === SIGNAL MODE ROW (height 46) ===
+   DashRect("R_SIG",  x,   y+38, w, 46,  C'10,25,42',  C'0,100,150', 0);
+   DashLabel("MD_L",  x+10,y+48, "Mode :",     10, clrSilver, false);
+   DashLabel("MODE_V",x+75, y+48, "NORMAL",    11, clrLime,   true);
+   DashLabel("RI_L",  x+10,y+66, "RSI  :",     10, clrSilver, false);
+   DashLabel("RSI_V", x+75, y+66, "--",         13, clrWhite,  true);
+   DashLabel("ST_L",  x+230,y+48, "Status :",  10, clrSilver, false);
+   DashLabel("STA_V", x+310,y+48, "READY",     11, clrLime,   true);
+   DashLabel("SP_L",  x+230,y+66, "Spread :",  10, clrSilver, false);
+   DashLabel("S_SPRV",x+310,y+66, "--",         11, clrWhite,  false);
+
+   // === DIVIDER ===
+   DashRect("DIV1",   x,   y+84, w,  2,  C'0,100,140', C'0,100,140', 0);
+
+   // === PROFIT TRACKER (height 90) ===
+   DashRect("R_PRF",  x,   y+86, w, 90,  C'12,26,40',  C'0,100,140', 0);
+   DashLabel("PHR",   x+10,y+92, "PROFIT TRACKER", 9, C'0,200,220', true);
+   DashLabel("D_L",   x+10,y+110,"Daily P/L :",   10, clrSilver,    false);
+   DashLabel("D_VAL", x+105,y+110,"0.00% | 0.00",  12, clrWhite,    false);
+   DashLabel("W_L",   x+10,y+132,"Weekly P/L :",  10, clrSilver,    false);
+   DashLabel("W_VAL", x+105,y+132,"0.00% | 0.00",  12, clrWhite,    false);
+
+   // === DIVIDER ===
+   DashRect("DIV2",   x,   y+176,w,  2,  C'0,100,140', C'0,100,140', 0);
+
+   // === LIVE TRADES (height 90) ===
+   DashRect("R_TRD",  x,   y+178,w, 90,  C'12,26,40',  C'0,100,140', 0);
+   DashLabel("THR",   x+10,y+184,"LIVE TRADES",    9, C'0,200,220', true);
+   DashLabel("TB_L",  x+10,y+202,"Buy Orders :",  10, clrSilver,    false);
+   DashLabel("T_BUY_V",x+130,y+200,"0",            16, clrLime,     true);
+   DashLabel("TS_L",  x+10,y+224,"Sell Orders :", 10, clrSilver,    false);
+   DashLabel("T_SEL_V",x+130,y+222,"0",            16, clrRed,      true);
+   DashLabel("PL_L",  x+230,y+202,"Float P/L :",  10, clrSilver,    false);
+   DashLabel("T_PL_V",x+230,y+218,"+0.00",         14, clrLime,     true);
+
+   // === DIVIDER ===
+   DashRect("DIV3",   x,   y+268,w,  2,  C'0,100,140', C'0,100,140', 0);
+
+   // === SETTINGS ROW (height 70) ===
+   DashRect("R_SET",  x,   y+270,w, 70,  C'10,22,36',  C'0,100,140', 0);
+   DashLabel("SHR",   x+10,y+275,"SETTINGS",       9, C'0,200,220', true);
+   // Left column
+   DashLabel("S_LOT", x+10,y+292,"Lot :",         10, clrSilver,    false);
+   DashLabel("S_LV",  x+55, y+292,"--",            11, clrYellow,    true);
+   DashLabel("S_SP",  x+10,y+312,"Spacing :",     10, clrSilver,    false);
+   DashLabel("S_SV",  x+90, y+312,"--",            11, clrYellow,    false);
+   // Right column
+   DashLabel("S_RSI", x+175,y+292,"RSI :",        10, clrSilver,    false);
+   DashLabel("S_RV",  x+220,y+292,"--",            11, clrYellow,    false);
+   DashLabel("S_MP",  x+175,y+312,"MaxP :",       10, clrSilver,    false);
+   DashLabel("S_MV",  x+220,y+312,"--",            11, clrYellow,    false);
+   // Far right column
+   DashLabel("S_SL",  x+315,y+292,"SL :",         10, clrSilver,    false);
+   DashLabel("S_SLV", x+345,y+292,"--",            11, clrYellow,    false);
+   DashLabel("S_ADX", x+315,y+312,"ADX :",        10, clrSilver,    false);
+   DashLabel("S_ADXV",x+355,y+312,"--",            11, clrYellow,    false);
 
    ChartRedraw(0);
 }
@@ -1046,47 +1074,62 @@ void UpdateDashboard()
    double floatPnL = GetTotalGridProfit();
    int buys=CountPositions(POSITION_TYPE_BUY);
    int sells=CountPositions(POSITION_TYPE_SELL);
+
    double rsiNow[]; ArraySetAsSeries(rsiNow,true);
    double adxNow[]; ArraySetAsSeries(adxNow,true);
-   double curRSI=0,curADX=0;
+   double curRSI=0, curADX=0;
    if(CopyBuffer(rsi_handle,0,0,3,rsiNow)>=3) curRSI=rsiNow[1];
    if(CopyBuffer(adx_handle,0,0,3,adxNow)>=3) curADX=adxNow[1];
-   double spreadPips=GetCurrentSpreadPips();
+   double spreadPips = GetCurrentSpreadPips();
 
-   DashLabelUpdate("ACC_TYPE",g_isCentAcct?"CENT (USC)":"STANDARD (USD)",g_isCentAcct?clrYellow:clrLime);
-   bool exLow=curRSI>0&&curRSI<=InpExtremeRSILow, exHigh=curRSI>0&&curRSI>=InpExtremeRSIHigh;
+   // Title row
+   DashLabelUpdate("ACC_TYPE", g_isCentAcct?"CENT (USC)":"STANDARD (USD)",
+                   g_isCentAcct?clrYellow:clrLime);
+
+   // Signal mode
+   bool exLow=curRSI>0&&curRSI<=InpExtremeRSILow;
+   bool exHigh=curRSI>0&&curRSI>=InpExtremeRSIHigh;
    if(exLow)       DashLabelUpdate("MODE_V","⚡ EXTREME BUY",  clrAqua);
    else if(exHigh) DashLabelUpdate("MODE_V","⚡ EXTREME SELL", clrOrange);
    else            DashLabelUpdate("MODE_V","NORMAL (Trend ON)",clrLime);
-   color rsiClr=curRSI<=30?clrAqua:curRSI>=70?clrOrange:clrWhite;
-   DashLabelUpdate("RSI_V",DoubleToString(curRSI,1),rsiClr);
-   string stTxt=g_recoveryMode?"RECOVERY":g_lastGridWasProfitable?"RE-ENTRY":"READY";
-   color  stClr=g_recoveryMode?clrOrange:g_lastGridWasProfitable?clrAqua:clrLime;
-   DashLabelUpdate("STA_V",stTxt,stClr);
 
+   // RSI — big and colored
+   color rsiClr = curRSI<=30?clrAqua : curRSI>=70?clrOrange : clrWhite;
+   DashLabelUpdate("RSI_V", DoubleToString(curRSI,1), rsiClr);
+
+   // Status
+   string stTxt = g_recoveryMode?"RECOVERY":g_lastGridWasProfitable?"RE-ENTRY":"READY";
+   color  stClr = g_recoveryMode?clrOrange:g_lastGridWasProfitable?clrAqua:clrLime;
+   DashLabelUpdate("STA_V", stTxt, stClr);
+
+   // Spread
+   color sprClr = spreadPips>InpMaxSpreadPips?clrRed:clrLime;
+   DashLabelUpdate("S_SPRV", DoubleToString(spreadPips,1)+" pips", sprClr);
+
+   // Daily/Weekly
    color dc=(dailyPnL>=0)?clrLime:clrRed; string ds=(dailyPnL>=0)?"+":"";
-   DashLabelUpdate("D_VAL",ds+DoubleToString(dPct,2)+"%|"+ds+DoubleToString(dailyPnL,2)+" "+g_currency,dc);
+   DashLabelUpdate("D_VAL", ds+DoubleToString(dPct,2)+"% | "+ds+DoubleToString(dailyPnL,2)+" "+g_currency, dc);
    color wc=(weeklyPnL>=0)?clrLime:clrRed; string ws=(weeklyPnL>=0)?"+":"";
-   DashLabelUpdate("W_VAL",ws+DoubleToString(wPct,2)+"%|"+ws+DoubleToString(weeklyPnL,2)+" "+g_currency,wc);
-   DashLabelUpdate("T_BUY_V",IntegerToString(buys), buys>0?clrLime:clrSilver);
-   DashLabelUpdate("T_SEL_V",IntegerToString(sells),sells>0?clrRed:clrSilver);
-   color plc=(floatPnL>=0)?clrLime:clrRed; string pls=(floatPnL>=0)?"+":"";
-   DashLabelUpdate("T_PL_V",pls+DoubleToString(floatPnL,2)+" "+g_currency,plc);
+   DashLabelUpdate("W_VAL", ws+DoubleToString(wPct,2)+"% | "+ws+DoubleToString(weeklyPnL,2)+" "+g_currency, wc);
 
-   string lotDisp=DoubleToString(g_activeLot,2)+(InpUseDynamicLot?" AUTO":" MAN");
-   DashLabelUpdate("S_LV",  lotDisp,                                             InpUseDynamicLot?clrAqua:clrYellow);
-   DashLabelUpdate("S_SV",  DoubleToString(g_spacingPips,0)+"p",                 clrYellow);
+   // Live trades — big numbers
+   DashLabelUpdate("T_BUY_V", IntegerToString(buys),  buys>0?clrLime:clrSilver);
+   DashLabelUpdate("T_SEL_V", IntegerToString(sells), sells>0?clrRed:clrSilver);
+   color plc=(floatPnL>=0)?clrLime:clrRed; string pls=(floatPnL>=0)?"+":"";
+   DashLabelUpdate("T_PL_V", pls+DoubleToString(floatPnL,2)+" "+g_currency, plc);
+
+   // Settings
+   string lotDisp = DoubleToString(g_activeLot,2)+(InpUseDynamicLot?" AUTO":" MANUAL");
+   DashLabelUpdate("S_LV",  lotDisp,                                                   InpUseDynamicLot?clrAqua:clrYellow);
+   DashLabelUpdate("S_SV",  DoubleToString(g_spacingPips,0)+" pips",                   clrYellow);
    DashLabelUpdate("S_RV",  DoubleToString(g_rsiBuyLvl,0)+"/"+DoubleToString(g_rsiSellLvl,0), clrYellow);
-   DashLabelUpdate("S_MV",  DoubleToString(g_maxProfitMult,0)+"x",               clrYellow);
-   DashLabelUpdate("S_SLV", DoubleToString(g_gridSLMult,0)+"x",                  clrYellow);
-   color sprClr=spreadPips>InpMaxSpreadPips?clrRed:clrLime;
-   DashLabelUpdate("S_SPRV",DoubleToString(spreadPips,1)+"p",                    sprClr);
+   DashLabelUpdate("S_MV",  DoubleToString(g_maxProfitMult,0)+"x",                     clrYellow);
+   DashLabelUpdate("S_SLV", DoubleToString(g_gridSLMult,0)+"x",                        clrYellow);
    color adxClr=curADX<InpADX_Weak?clrRed:curADX>InpADX_Strong?clrLime:clrYellow;
-   DashLabelUpdate("S_ADXV",DoubleToString(curADX,1),                            adxClr);
+   DashLabelUpdate("S_ADXV",DoubleToString(curADX,1),                                  adxClr);
 
    ChartRedraw(0);
 }
-
 
 void DashRect(string n,int x,int y,int w,int h,color bg,color brd,int t)
 {
