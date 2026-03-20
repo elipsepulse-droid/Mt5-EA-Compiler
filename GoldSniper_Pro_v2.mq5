@@ -28,9 +28,9 @@
 //|  - Auto symbol/account detection                                 |
 //|  - Orphan pending order cleanup                                  |
 //+------------------------------------------------------------------+
-#property copyright   "EA SCALPING ROBOT / DANE - v3.9"
-#property version     "3.90"
-#property description "Grid EA v3.9 — 14 Upgrades | Smart Risk Management"
+#property copyright   "EA SCALPING ROBOT / DANE - v4.1"
+#property version     "4.10"
+#property description "Grid EA v4.1 — News Filter + Regime Detection + RSI Divergence"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -120,7 +120,36 @@ input int    InpReEntryBars      = 3;    // Re-enter if signal still valid after
 
 input group "====== IMPROVEMENT 13: GRID RECOVERY ======"
 input bool   InpUseRecovery      = true;
-input double InpRecoveryLotMult  = 0.5; // Recovery lot = 50% of normal lot
+input double InpRecoveryLotMult  = 0.5;
+
+input group "====== v4.1: NEWS FILTER (Manual Time Block) ======"
+// EA automatically pauses new entries during high-impact news windows
+// All times are GMT (Exness server time) — subtract 8hrs for PHT
+// Example: GMT 12:30 = PHT 8:30 PM
+input bool   InpUseNewsFilter    = true;  // Enable news time filter
+input bool   InpBlockNFP         = true;  // Block 1st Friday 12:20-13:00 GMT (NFP)
+input bool   InpBlockFed         = true;  // Block Wednesday 18:00-18:30 GMT (Fed — 8x/year)
+input bool   InpBlockCPI         = true;  // Block 2nd/3rd Wed 12:20-13:00 GMT (CPI)
+input bool   InpBlockThursday    = true;  // Block Thursday 12:20-12:50 GMT (Jobless Claims)
+input int    InpNewsBufferMins   = 30;    // Minutes before AND after news to pause
+
+input group "====== v4.1: MARKET REGIME DETECTION ======"
+// ADX-based regime switch — changes strategy based on trend strength
+// Ranging (ADX<25): Normal RSI strategy
+// Trending (ADX 25-40): Hybrid — trend pullback entries added
+// Extreme (ADX>40): Momentum mode — relax SELL/BUY levels for faster entry
+input bool   InpUseRegime        = true;
+input double InpADX_Ranging      = 25.0;  // Below = ranging market
+input double InpADX_Trending     = 40.0;  // Above = extreme trend mode
+input double InpRSI_ExtremeBuy   = 40.0;  // RSI BUY level in extreme DOWNTREND (ADX>40)
+input double InpRSI_ExtremeSell  = 60.0;  // RSI SELL level in extreme UPTREND (ADX>40)
+
+input group "====== v4.1: RSI DIVERGENCE EXIT ======"
+// Detects when trend is exhausted — warns before reversal
+// Bullish divergence: price lower low BUT RSI higher low = downtrend weakening
+// Bearish divergence: price higher high BUT RSI lower high = uptrend weakening
+input bool   InpUseDivergence    = true;  // Enable divergence detection
+input int    InpDivLookback      = 5;     // Bars to look back for divergence
 
 input group "====== ENTRY SIGNAL: RSI ======"
 input int                InpRSI_Period  = 14;
@@ -184,7 +213,20 @@ double g_breakevenPoints;
 // Account/symbol flags
 bool   g_isBTC = false, g_isGold = false, g_isCentAcct = false;
 string g_currency = "USD";
-double g_activeLot = 0.01; // Tracks the actual lot being used — shown on dashboard
+double g_activeLot = 0.01;
+
+// v4.1 — News filter state
+bool   g_newsActive    = false;   // true = news window active, block new entries
+string g_newsEventName = "";      // name of current news event for dashboard/log
+
+// v4.1 — Market regime state
+// 0=ranging, 1=trending, 2=extreme trend
+int    g_marketRegime  = 0;
+string g_regimeName    = "RANGING";
+
+// v4.1 — RSI Divergence state
+bool   g_bullDivergence = false;  // Bullish divergence detected — downtrend weakening
+bool   g_bearDivergence = false;  // Bearish divergence detected — uptrend weakening
 
 // Candle confirmation tracking
 bool     g_buySignalPending  = false;
@@ -314,7 +356,8 @@ int OnInit()
 
    if(InpShowDashboard) CreateDashboard();
 
-   Print("=== EA GRID v3.9 INITIALIZED on ", _Symbol, " ===");
+   Print("=== EA GRID v4.1 INITIALIZED on ", _Symbol, " ===");
+   Print("v4.1: News Filter | Market Regime Detection | RSI Divergence Exit");
    Print("Account  : ", (g_isCentAcct?"CENT (USC)":"STANDARD (USD)"),
          " | Balance: ", DoubleToString(safeBalance,2), " ", g_currency);
    Print("Symbol   : ", _Symbol, " | Grid: ", g_gridSize,
@@ -390,6 +433,47 @@ void OnTick()
 
    bool hasBuys  = (CountPositions(POSITION_TYPE_BUY)  > 0);
    bool hasSells = (CountPositions(POSITION_TYPE_SELL) > 0);
+
+   //===================================================================
+   //  v4.1 — NEWS FILTER CHECK (runs every new bar)
+   //  Blocks all new entries during high-impact news windows
+   //  Shows event name on dashboard and in Experts log
+   //===================================================================
+   g_newsActive = IsNewsTime();
+   if(g_newsActive)
+   {
+      if(InpDebugLog) Print("📰 NEWS FILTER ACTIVE: ", g_newsEventName,
+                            " — no new entries until news window clears.");
+      return; // Skip all entry logic during news
+   }
+
+   //===================================================================
+   //  v4.1 — MARKET REGIME DETECTION
+   //  Adjusts RSI entry levels based on ADX trend strength
+   //===================================================================
+   double effectiveBuyLvl  = g_rsiBuyLvl;
+   double effectiveSellLvl = g_rsiSellLvl;
+   DetectMarketRegime(adx_val[1], effectiveBuyLvl, effectiveSellLvl);
+
+   //===================================================================
+   //  v4.1 — RSI DIVERGENCE DETECTION
+   //  Load close prices for divergence check
+   //===================================================================
+   double close_val[];
+   ArraySetAsSeries(close_val, true);
+   if(CopyClose(_Symbol, PERIOD_CURRENT, 0, InpDivLookback+5, close_val) >= InpDivLookback+5)
+      DetectRSIDivergence(rsi_val, close_val);
+
+   // If bullish divergence detected — block new SELL entries (reversal warning)
+   // If bearish divergence detected — block new BUY entries (reversal warning)
+   if(g_bullDivergence && hasSells)
+   {
+      if(InpDebugLog) Print("🟢 Divergence: Blocking SELL entries — downtrend may reverse soon.");
+   }
+   if(g_bearDivergence && hasBuys)
+   {
+      if(InpDebugLog) Print("🔴 Divergence: Blocking BUY entries — uptrend may reverse soon.");
+   }
 
    //===================================================================
    //  IMPROVEMENT 1 — SPREAD FILTER
@@ -510,41 +594,53 @@ void OnTick()
    bool tDn = (tf_fast[InpTF_Shift] < tf_slow[InpTF_Shift]);
 
    //===================================================================
-   //  RSI ENTRY SIGNALS
+   //  RSI ENTRY SIGNALS — using regime-adjusted levels
+   //  Normal: 30/70 | Extreme trend: 40/60 (from regime detection)
    //===================================================================
    int rs = InpRSI_Shift;
    double currentRSI = rsi_val[rs];
    double prevRSI    = rsi_val[rs+1];
 
-   bool rsiBuyCross  = (currentRSI >  g_rsiBuyLvl  && prevRSI <= g_rsiBuyLvl);
-   bool rsiSellCross = (currentRSI <  g_rsiSellLvl && prevRSI >= g_rsiSellLvl);
+   // Use effective levels from regime detection (v4.1)
+   bool rsiBuyCross  = (currentRSI >  effectiveBuyLvl  && prevRSI <= effectiveBuyLvl);
+   bool rsiSellCross = (currentRSI <  effectiveSellLvl && prevRSI >= effectiveSellLvl);
+
+   //===================================================================
+   //  OPTION 1 — EXTREME RSI BYPASS FLAGS
+   //  Calculated BEFORE candle confirmation and MACD
+   //  so bypass can override those restrictions
+   //===================================================================
+   bool extremeOversold   = (prevRSI < InpExtremeRSILow);
+   bool extremeOverbought = (prevRSI > InpExtremeRSIHigh);
 
    //===================================================================
    //  IMPROVEMENT 9 — CANDLE CONFIRMATION
-   //  Track RSI signal for 2 bars before firing
+   //  Normal mode: wait 2 bars to confirm signal is real
+   //  Bypass mode: wait only 1 bar — extreme moves are real, not fake
+   //  FIX v4.0: During bypass, 1 bar is enough — price already moved
+   //  100+ pips proving the move is genuine
    //===================================================================
+   int requiredBars = (extremeOversold || extremeOverbought) ? 1 : 2;
+
    if(InpUseCandleConfirm)
    {
-      // New RSI cross detected — start counting
       if(rsiBuyCross  && !g_buySignalPending)
       { g_buySignalPending  = true; g_signalBarsCount = 0; g_signalBarTime = currentBar; }
       if(rsiSellCross && !g_sellSignalPending)
       { g_sellSignalPending = true; g_signalBarsCount = 0; g_signalBarTime = currentBar; }
 
-      // Count bars since signal appeared
       if(g_buySignalPending  || g_sellSignalPending) g_signalBarsCount++;
 
-      // Signal confirmed after 2 bars — check RSI still on same side
-      bool buyConfirmed  = g_buySignalPending  && g_signalBarsCount >= 2 && currentRSI > g_rsiBuyLvl;
-      bool sellConfirmed = g_sellSignalPending && g_signalBarsCount >= 2 && currentRSI < g_rsiSellLvl;
+      // Use effectiveBuyLvl/SellLvl (regime-adjusted) for consistency
+      bool buyConfirmed  = g_buySignalPending  && g_signalBarsCount >= requiredBars && currentRSI > effectiveBuyLvl;
+      bool sellConfirmed = g_sellSignalPending && g_signalBarsCount >= requiredBars && currentRSI < effectiveSellLvl;
 
-      // Reset if RSI reverses before confirmation
-      if(g_buySignalPending  && currentRSI < g_rsiBuyLvl -5)
+      // Reset if RSI reverses before confirmation (use effective levels)
+      if(g_buySignalPending  && currentRSI < effectiveBuyLvl  - 5)
       { g_buySignalPending  = false; g_signalBarsCount = 0; }
-      if(g_sellSignalPending && currentRSI > g_rsiSellLvl+5)
+      if(g_sellSignalPending && currentRSI > effectiveSellLvl + 5)
       { g_sellSignalPending = false; g_signalBarsCount = 0; }
 
-      // Reset confirmed signals
       if(buyConfirmed)  { rsiBuyCross  = true; g_buySignalPending  = false; }
       else              { rsiBuyCross  = false; }
       if(sellConfirmed) { rsiSellCross = true; g_sellSignalPending = false; }
@@ -553,20 +649,35 @@ void OnTick()
 
    //===================================================================
    //  IMPROVEMENT 5 — MACD CONFIRMATION
-   //  RSI signal must agree with MACD histogram direction
+   //  Normal mode: MACD must agree with signal direction
+   //  Bypass mode: MACD is IGNORED — during extreme RSI levels
+   //  MACD will always be deeply negative (oversold) or positive
+   //  (overbought). Requiring MACD confirmation in bypass mode
+   //  is contradictory and will always block the trade.
+   //  FIX v4.0: Skip MACD check entirely when bypass is active
    //===================================================================
    bool macdBullish = true, macdBearish = true;
-   if(InpUseMACD)
+   if(InpUseMACD && !extremeOversold && !extremeOverbought)
    {
-      double macdHist1 = macd_main[1] - macd_sig[1]; // current histogram
-      double macdHist2 = macd_main[2] - macd_sig[2]; // previous histogram
-      macdBullish = (macdHist1 > 0 || macdHist1 > macdHist2); // rising or positive
-      macdBearish = (macdHist1 < 0 || macdHist1 < macdHist2); // falling or negative
+      // Only check MACD in NORMAL mode — bypass overrides MACD
+      double macdHist1 = macd_main[1] - macd_sig[1];
+      double macdHist2 = macd_main[2] - macd_sig[2];
+      macdBullish = (macdHist1 > 0 || macdHist1 > macdHist2);
+      macdBearish = (macdHist1 < 0 || macdHist1 < macdHist2);
+      if(InpDebugLog && (macdBullish==false || macdBearish==false))
+         Print("  MACD filter active (normal mode): H=",DoubleToString(macdHist1,5));
+   }
+   else if(extremeOversold || extremeOverbought)
+   {
+      // Bypass mode — MACD ignored, both set to true
+      macdBullish = true;
+      macdBearish = true;
+      if(InpDebugLog)
+         Print("  MACD bypassed — extreme RSI mode (prev RSI=",DoubleToString(prevRSI,2),")");
    }
 
    //===================================================================
    //  IMPROVEMENT 8 — VOLUME FILTER
-   //  Skip entry if current candle volume is too low
    //===================================================================
    bool volumeOK = true;
    if(InpUseVolFilter)
@@ -577,21 +688,20 @@ void OnTick()
       avgVol /= 14.0;
       volumeOK = (avgVol > 0 && curVol >= avgVol * InpMinVolMultiplier);
       if(!volumeOK && InpDebugLog)
-         Print("VOLUME FILTER: Low volume (", curVol, " vs avg ", DoubleToString(avgVol,0), ") — skipping entry.");
+         Print("VOLUME FILTER: Low volume — skipping entry.");
    }
 
    //===================================================================
-   //  OPTION 1 — EXTREME RSI BYPASS
-   //===================================================================
-   bool extremeOversold   = (prevRSI < InpExtremeRSILow);
-   bool extremeOverbought = (prevRSI > InpExtremeRSIHigh);
-
-   //===================================================================
-   //  COMBINED ENTRY DECISION
+   //  COMBINED ENTRY DECISION — v4.1
+   //  Added: divergence block — don't open new grids against divergence
+   //  Added: regime-adjusted RSI levels already in rsiBuyCross/rsiSellCross
    //===================================================================
    bool doOpenBuy  = rsiBuyCross  && macdBullish && volumeOK &&
-                     (tUp || extremeOversold) && !hasBuys;
+                     (tUp || extremeOversold) && !hasBuys &&
+                     !g_bearDivergence;  // v4.1: don't buy into bearish divergence
    bool doOpenSell = rsiSellCross && macdBearish && volumeOK &&
+                     (tDn || extremeOverbought) && !hasSells &&
+                     !g_bullDivergence;  // v4.1: don't sell into bullish divergence
                      (tDn || extremeOverbought) && !hasSells;
 
    //===================================================================
@@ -672,7 +782,8 @@ void OnTick()
             " | Grid=", adaptiveGridSize, " orders | Lot=", DoubleToString(activeLot,3));
       if(!rsiBuyCross && !rsiSellCross)
          Print("  → Waiting: RSI=", DoubleToString(currentRSI,2),
-               " (need cross of ", g_rsiBuyLvl, " for BUY or ", g_rsiSellLvl, " for SELL)");
+               " (need cross of ", effectiveBuyLvl, " BUY / ", effectiveSellLvl,
+               " SELL | Regime:", g_regimeName, ")");
       else if(doOpenBuy)
          Print("  → BUY ENTRY CONFIRMED: All conditions met! Opening grid.");
       else if(doOpenSell)
@@ -891,6 +1002,180 @@ double GetCurrentSpreadPips()
 }
 
 //==========================================================================
+//  v4.1 — NEWS FILTER
+//  Checks if current GMT time falls within a known high-impact news window
+//  All windows use GMT (Exness server time)
+//  PHT = GMT + 8 hours
+//
+//  SCHEDULE (GMT times):
+//  NFP        : 1st Friday each month  12:20–13:00 GMT = 8:20–9:00 PM PHT
+//  Fed Rate   : 8x/year Wednesday      18:00–18:30 GMT = 2:00–2:30 AM PHT
+//  CPI        : Monthly ~2nd Wed       12:20–13:00 GMT = 8:20–9:00 PM PHT
+//  Jobless    : Every Thursday         12:20–12:50 GMT = 8:20–8:50 PM PHT
+//==========================================================================
+bool IsNewsTime()
+{
+   if(!InpUseNewsFilter) return false;
+
+   MqlDateTime dt;
+   TimeToStruct(TimeGMT(), dt);
+   int h   = dt.hour;
+   int m   = dt.min;
+   int dow = dt.day_of_week; // 0=Sun,1=Mon,2=Tue,3=Wed,4=Thu,5=Fri,6=Sat
+   int dom = dt.day;         // day of month 1-31
+   int totalMins = h * 60 + m;
+   int buf = InpNewsBufferMins;
+
+   // --- NFP: 1st Friday of month at 12:30 GMT ---
+   // 1st Friday = day <= 7 and day_of_week = 5
+   if(InpBlockNFP && dow == 5 && dom <= 7)
+   {
+      int nfpStart = 12*60+30 - buf;  // e.g. 12:00 GMT
+      int nfpEnd   = 12*60+30 + buf;  // e.g. 13:00 GMT
+      if(totalMins >= nfpStart && totalMins <= nfpEnd)
+      { g_newsEventName = "⚠ NFP"; return true; }
+   }
+
+   // --- Fed Rate Decision: Wednesday 18:00 GMT (8 times/year approx) ---
+   // We block every Wednesday 18:00 as a safety net — Fed months are known
+   if(InpBlockFed && dow == 3)
+   {
+      int fedStart = 18*60+0  - buf;
+      int fedEnd   = 18*60+0  + buf;
+      if(totalMins >= fedStart && totalMins <= fedEnd)
+      { g_newsEventName = "⚠ FED"; return true; }
+   }
+
+   // --- CPI: ~2nd or 3rd Wednesday at 12:30 GMT ---
+   if(InpBlockCPI && dow == 3 && dom >= 8 && dom <= 21)
+   {
+      int cpiStart = 12*60+30 - buf;
+      int cpiEnd   = 12*60+30 + buf;
+      if(totalMins >= cpiStart && totalMins <= cpiEnd)
+      { g_newsEventName = "⚠ CPI"; return true; }
+   }
+
+   // --- Jobless Claims: Every Thursday 12:30 GMT ---
+   if(InpBlockThursday && dow == 4)
+   {
+      int jcStart = 12*60+30 - buf;
+      int jcEnd   = 12*60+30 + buf;
+      if(totalMins >= jcStart && totalMins <= jcEnd)
+      { g_newsEventName = "⚠ CLAIMS"; return true; }
+   }
+
+   g_newsEventName = "";
+   return false;
+}
+
+//==========================================================================
+//  v4.1 — MARKET REGIME DETECTION
+//  Uses ADX to detect current market condition and adjust RSI levels
+//  Returns effective BUY and SELL RSI levels for current regime
+//==========================================================================
+void DetectMarketRegime(double adx, double &effectiveBuy, double &effectiveSell)
+{
+   if(!InpUseRegime)
+   {
+      g_marketRegime = 0;
+      g_regimeName   = "NORMAL";
+      effectiveBuy   = g_rsiBuyLvl;
+      effectiveSell  = g_rsiSellLvl;
+      return;
+   }
+
+   if(adx < InpADX_Ranging)
+   {
+      // RANGING — use normal RSI levels
+      g_marketRegime = 0;
+      g_regimeName   = "RANGING";
+      effectiveBuy   = g_rsiBuyLvl;   // 30
+      effectiveSell  = g_rsiSellLvl;  // 70
+   }
+   else if(adx >= InpADX_Ranging && adx < InpADX_Trending)
+   {
+      // TRENDING — use normal levels, rely on bypass for extremes
+      g_marketRegime = 1;
+      g_regimeName   = "TRENDING";
+      effectiveBuy   = g_rsiBuyLvl;
+      effectiveSell  = g_rsiSellLvl;
+   }
+   else
+   {
+      // EXTREME TREND — relax levels so EA can catch trend continuation
+      // In extreme downtrend: SELL fires at 60 (not 70) — trend still has room
+      // In extreme uptrend:   BUY fires at 40 (not 30) — trend continuation
+      g_marketRegime = 2;
+      g_regimeName   = "EXTREME";
+      effectiveBuy   = InpRSI_ExtremeBuy;   // 40 — catches trend continuation buys
+      effectiveSell  = InpRSI_ExtremeSell;  // 60 — catches trend continuation sells
+   }
+}
+
+//==========================================================================
+//  v4.1 — RSI DIVERGENCE DETECTION
+//  Detects when trend is losing momentum — early warning before reversal
+//
+//  Bullish divergence: Price makes LOWER LOW but RSI makes HIGHER LOW
+//                      → Downtrend exhausted — stop selling, watch for reversal
+//  Bearish divergence: Price makes HIGHER HIGH but RSI makes LOWER HIGH
+//                      → Uptrend exhausted — stop buying, watch for reversal
+//==========================================================================
+void DetectRSIDivergence(double &rsi_vals[], double &close_vals[])
+{
+   g_bullDivergence = false;
+   g_bearDivergence = false;
+   if(!InpUseDivergence) return;
+
+   int lb = InpDivLookback;
+   if(ArraySize(rsi_vals) < lb+3 || ArraySize(close_vals) < lb+3) return;
+
+   // Find recent price low and RSI low
+   double recentPriceLow  = close_vals[1];
+   double prevPriceLow    = close_vals[1];
+   double recentRSILow    = rsi_vals[1];
+   double prevRSILow      = rsi_vals[1];
+
+   // Find recent price high and RSI high
+   double recentPriceHigh = close_vals[1];
+   double prevPriceHigh   = close_vals[1];
+   double recentRSIHigh   = rsi_vals[1];
+   double prevRSIHigh     = rsi_vals[1];
+
+   // Scan lookback bars for swing lows and highs
+   for(int i=2; i<=lb; i++)
+   {
+      if(close_vals[i] < recentPriceLow)
+      { prevPriceLow = recentPriceLow; prevRSILow = recentRSILow;
+        recentPriceLow = close_vals[i]; recentRSILow = rsi_vals[i]; }
+
+      if(close_vals[i] > recentPriceHigh)
+      { prevPriceHigh = recentPriceHigh; prevRSIHigh = recentRSIHigh;
+        recentPriceHigh = close_vals[i]; recentRSIHigh = rsi_vals[i]; }
+   }
+
+   // Bullish divergence: price lower low + RSI higher low
+   if(recentPriceLow < prevPriceLow && recentRSILow > prevRSILow && recentRSILow < 45)
+   {
+      g_bullDivergence = true;
+      if(InpDebugLog) Print("🟢 BULLISH DIVERGENCE: Price lower low (",
+         DoubleToString(recentPriceLow,2), "<", DoubleToString(prevPriceLow,2),
+         ") but RSI higher low (", DoubleToString(recentRSILow,2), ">",
+         DoubleToString(prevRSILow,2), ") — downtrend may be exhausted.");
+   }
+
+   // Bearish divergence: price higher high + RSI lower high
+   if(recentPriceHigh > prevPriceHigh && recentRSIHigh < prevRSIHigh && recentRSIHigh > 55)
+   {
+      g_bearDivergence = true;
+      if(InpDebugLog) Print("🔴 BEARISH DIVERGENCE: Price higher high (",
+         DoubleToString(recentPriceHigh,2), ">", DoubleToString(prevPriceHigh,2),
+         ") but RSI lower high (", DoubleToString(recentRSIHigh,2), "<",
+         DoubleToString(prevRSIHigh,2), ") — uptrend may be exhausted.");
+   }
+}
+
+//==========================================================================
 //  CLEAN ORPHANED PENDING ORDERS
 //==========================================================================
 void CleanOrphanedPending()
@@ -982,83 +1267,78 @@ void CloseAllGridOrders()
 }
 
 //==========================================================================
-//  DASHBOARD — SQUARE LEFT SIDE VERSION
-//  460px wide x 340px tall — sits on left half of chart
-//  Big readable text — all values clearly visible
+//  DASHBOARD — COMPACT FIT v4.0
+//  460px wide x 280px tall
+//  Signal row: SAME SIZE (Mode/RSI/Status/Spread)
+//  Profit/Trades/Settings: smaller, tighter — all fit on screen
 //==========================================================================
 void CreateDashboard()
 {
    DeleteDashboard();
-   int x = InpDashX;   // default 10 = left side
-   int y = InpDashY;   // default 20 = top
-   int w = 460;        // half chart width
-   int h = 340;        // square-ish height
+   int x=InpDashX, y=InpDashY, w=460, h=280;
 
-   // === MAIN BACKGROUND ===
-   DashRect("BG",     x,   y,    w, h,   C'15,30,45',  C'0,120,160', 2);
+   DashRect("BG",     x,  y,    w, h,  C'15,30,45', C'0,120,160', 2);
 
-   // === TITLE ROW (height 38) ===
-   DashRect("R_TTL",  x,   y,    w, 38,  C'0,85,125',  C'0,150,190', 0);
-   DashLabel("TITLE", x+10,y+10, "⚡ DANE GRID EA v3.9", 12, clrWhite, true);
-   DashRect("ACC_BG", x+w-110,y+7,102,24,C'0,55,85',C'0,180,220',1);
-   DashLabel("ACC_TYPE",x+w-106,y+12,"LOADING...", 9, clrYellow, false);
+   // TITLE (y to y+30)
+   DashRect("R_TTL",  x,  y,    w, 30, C'0,85,125', C'0,150,190', 0);
+   DashLabel("TITLE", x+10,y+8, "⚡ DANE GRID EA v4.1", 11, clrWhite, true);
+   // News indicator — tiny label, red when active
+   DashLabel("NEWS_V",x+220,y+9, "",  8, clrRed, true);
+   DashRect("ACC_BG", x+w-105,y+5,98,20,C'0,55,85',C'0,180,220',1);
+   DashLabel("ACC_TYPE",x+w-101,y+9,"LOADING...", 8, clrYellow, false);
 
-   // === SIGNAL MODE ROW (height 46) ===
-   DashRect("R_SIG",  x,   y+38, w, 46,  C'10,25,42',  C'0,100,150', 0);
-   DashLabel("MD_L",  x+10,y+48, "Mode :",     10, clrSilver, false);
-   DashLabel("MODE_V",x+75, y+48, "NORMAL",    11, clrLime,   true);
-   DashLabel("RI_L",  x+10,y+66, "RSI  :",     10, clrSilver, false);
-   DashLabel("RSI_V", x+75, y+66, "--",         13, clrWhite,  true);
-   DashLabel("ST_L",  x+230,y+48, "Status :",  10, clrSilver, false);
-   DashLabel("STA_V", x+310,y+48, "READY",     11, clrLime,   true);
-   DashLabel("SP_L",  x+230,y+66, "Spread :",  10, clrSilver, false);
-   DashLabel("S_SPRV",x+310,y+66, "--",         11, clrWhite,  false);
+   // SIGNAL ROW — SAME SIZE (y+30 to y+98)
+   DashRect("R_SIG",  x,  y+30, w, 68, C'10,25,42', C'0,100,150', 0);
+   DashLabel("MD_L",  x+10,y+40,"Mode :",    10, clrSilver, false);
+   DashLabel("MODE_V",x+72, y+40,"NORMAL",   11, clrLime,   true);
+   DashLabel("RI_L",  x+10,y+62,"RSI  :",    10, clrSilver, false);
+   DashLabel("RSI_V", x+72, y+62,"--",        13, clrWhite,  true);
+   DashLabel("ST_L",  x+235,y+40,"Status :", 10, clrSilver, false);
+   DashLabel("STA_V", x+310,y+40,"READY",    11, clrLime,   true);
+   DashLabel("SP_L",  x+235,y+62,"Spread :", 10, clrSilver, false);
+   DashLabel("S_SPRV",x+310,y+62,"--",        11, clrWhite,  false);
 
-   // === DIVIDER ===
-   DashRect("DIV1",   x,   y+84, w,  2,  C'0,100,140', C'0,100,140', 0);
+   DashRect("DIV1",   x,  y+98, w,  1, C'0,100,140', C'0,100,140', 0);
 
-   // === PROFIT TRACKER (height 90) ===
-   DashRect("R_PRF",  x,   y+86, w, 90,  C'12,26,40',  C'0,100,140', 0);
-   DashLabel("PHR",   x+10,y+92, "PROFIT TRACKER", 9, C'0,200,220', true);
-   DashLabel("D_L",   x+10,y+110,"Daily P/L :",   10, clrSilver,    false);
-   DashLabel("D_VAL", x+105,y+110,"0.00% | 0.00",  12, clrWhite,    false);
-   DashLabel("W_L",   x+10,y+132,"Weekly P/L :",  10, clrSilver,    false);
-   DashLabel("W_VAL", x+105,y+132,"0.00% | 0.00",  12, clrWhite,    false);
+   // PROFIT (y+99 to y+152) — smaller
+   DashRect("R_PRF",  x,  y+99, w, 53, C'12,26,40', C'0,100,140', 0);
+   DashLabel("PHR",   x+10,y+104,"PROFIT TRACKER",8, C'0,200,220', true);
+   DashLabel("D_L",   x+10,y+118,"Daily P/L :",   8, clrSilver,   false);
+   DashLabel("D_VAL", x+90,y+118,"0.00% | 0.00",  10,clrWhite,    false);
+   DashLabel("W_L",   x+10,y+136,"Weekly P/L :",  8, clrSilver,   false);
+   DashLabel("W_VAL", x+90,y+136,"0.00% | 0.00",  10,clrWhite,    false);
 
-   // === DIVIDER ===
-   DashRect("DIV2",   x,   y+176,w,  2,  C'0,100,140', C'0,100,140', 0);
+   DashRect("DIV2",   x,  y+152,w,  1, C'0,100,140', C'0,100,140', 0);
 
-   // === LIVE TRADES (height 90) ===
-   DashRect("R_TRD",  x,   y+178,w, 90,  C'12,26,40',  C'0,100,140', 0);
-   DashLabel("THR",   x+10,y+184,"LIVE TRADES",    9, C'0,200,220', true);
-   DashLabel("TB_L",  x+10,y+202,"Buy Orders :",  10, clrSilver,    false);
-   DashLabel("T_BUY_V",x+130,y+200,"0",            16, clrLime,     true);
-   DashLabel("TS_L",  x+10,y+224,"Sell Orders :", 10, clrSilver,    false);
-   DashLabel("T_SEL_V",x+130,y+222,"0",            16, clrRed,      true);
-   DashLabel("PL_L",  x+230,y+202,"Float P/L :",  10, clrSilver,    false);
-   DashLabel("T_PL_V",x+230,y+218,"+0.00",         14, clrLime,     true);
+   // LIVE TRADES (y+153 to y+205) — smaller
+   DashRect("R_TRD",  x,  y+153,w, 52, C'12,26,40', C'0,100,140', 0);
+   DashLabel("THR",   x+10,y+158,"LIVE TRADES",   8, C'0,200,220', true);
+   DashLabel("TB_L",  x+10,y+172,"Buy Orders :",  8, clrSilver,   false);
+   DashLabel("T_BUY_V",x+105,y+170,"0",           13,clrLime,     true);
+   DashLabel("TS_L",  x+10,y+188,"Sell Orders :", 8, clrSilver,   false);
+   DashLabel("T_SEL_V",x+105,y+186,"0",           13,clrRed,      true);
+   DashLabel("PL_L",  x+210,y+172,"Float P/L :",  8, clrSilver,   false);
+   DashLabel("T_PL_V",x+210,y+186,"+0.00",        11,clrLime,     true);
 
-   // === DIVIDER ===
-   DashRect("DIV3",   x,   y+268,w,  2,  C'0,100,140', C'0,100,140', 0);
+   DashRect("DIV3",   x,  y+205,w,  1, C'0,100,140', C'0,100,140', 0);
 
-   // === SETTINGS ROW (height 70) ===
-   DashRect("R_SET",  x,   y+270,w, 70,  C'10,22,36',  C'0,100,140', 0);
-   DashLabel("SHR",   x+10,y+275,"SETTINGS",       9, C'0,200,220', true);
-   // Left column
-   DashLabel("S_LOT", x+10,y+292,"Lot :",         10, clrSilver,    false);
-   DashLabel("S_LV",  x+55, y+292,"--",            11, clrYellow,    true);
-   DashLabel("S_SP",  x+10,y+312,"Spacing :",     10, clrSilver,    false);
-   DashLabel("S_SV",  x+90, y+312,"--",            11, clrYellow,    false);
-   // Right column
-   DashLabel("S_RSI", x+175,y+292,"RSI :",        10, clrSilver,    false);
-   DashLabel("S_RV",  x+220,y+292,"--",            11, clrYellow,    false);
-   DashLabel("S_MP",  x+175,y+312,"MaxP :",       10, clrSilver,    false);
-   DashLabel("S_MV",  x+220,y+312,"--",            11, clrYellow,    false);
-   // Far right column
-   DashLabel("S_SL",  x+315,y+292,"SL :",         10, clrSilver,    false);
-   DashLabel("S_SLV", x+345,y+292,"--",            11, clrYellow,    false);
-   DashLabel("S_ADX", x+315,y+312,"ADX :",        10, clrSilver,    false);
-   DashLabel("S_ADXV",x+355,y+312,"--",            11, clrYellow,    false);
+   // SETTINGS (y+206 to y+280) — smaller 2 lines
+   DashRect("R_SET",  x,  y+206,w, 74, C'10,22,36', C'0,100,140', 0);
+   DashLabel("SHR",   x+10,y+211,"SETTINGS",       8, C'0,200,220', true);
+   DashLabel("S_LOT", x+10,y+225,"Lot:",            8, clrSilver,   false);
+   DashLabel("S_LV",  x+40,y+225,"--",              9, clrYellow,   true);
+   DashLabel("S_SP",  x+155,y+225,"Spacing:",       8, clrSilver,   false);
+   DashLabel("S_SV",  x+210,y+225,"--",             9, clrYellow,   false);
+   DashLabel("S_RSI", x+275,y+225,"RSI:",           8, clrSilver,   false);
+   DashLabel("S_RV",  x+305,y+225,"--",             9, clrYellow,   false);
+   DashLabel("S_MP",  x+10,y+245,"MaxP:",           8, clrSilver,   false);
+   DashLabel("S_MV",  x+48,y+245,"--",              9, clrYellow,   false);
+   DashLabel("S_SL",  x+100,y+245,"SL:",            8, clrSilver,   false);
+   DashLabel("S_SLV", x+122,y+245,"--",             9, clrYellow,   false);
+   DashLabel("S_ADX", x+175,y+245,"ADX:",           8, clrSilver,   false);
+   DashLabel("S_ADXV",x+205,y+245,"--",             9, clrYellow,   false);
+   DashLabel("S_GRD", x+270,y+245,"Grid:",          8, clrSilver,   false);
+   DashLabel("S_GRV", x+305,y+245,"--",             9, clrYellow,   false);
 
    ChartRedraw(0);
 }
@@ -1069,67 +1349,72 @@ void UpdateDashboard()
    double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
    double dailyPnL  = balance - g_dailyStartBalance;
    double weeklyPnL = balance - g_weeklyStartBalance;
-   double dPct = (g_dailyStartBalance >0)?(dailyPnL /g_dailyStartBalance *100.0):0;
-   double wPct = (g_weeklyStartBalance>0)?(weeklyPnL/g_weeklyStartBalance*100.0):0;
-   double floatPnL = GetTotalGridProfit();
+   double dPct=(g_dailyStartBalance >0)?(dailyPnL /g_dailyStartBalance *100.0):0;
+   double wPct=(g_weeklyStartBalance>0)?(weeklyPnL/g_weeklyStartBalance*100.0):0;
+   double floatPnL=GetTotalGridProfit();
    int buys=CountPositions(POSITION_TYPE_BUY);
    int sells=CountPositions(POSITION_TYPE_SELL);
-
    double rsiNow[]; ArraySetAsSeries(rsiNow,true);
    double adxNow[]; ArraySetAsSeries(adxNow,true);
-   double curRSI=0, curADX=0;
+   double curRSI=0,curADX=0;
    if(CopyBuffer(rsi_handle,0,0,3,rsiNow)>=3) curRSI=rsiNow[1];
    if(CopyBuffer(adx_handle,0,0,3,adxNow)>=3) curADX=adxNow[1];
-   double spreadPips = GetCurrentSpreadPips();
+   double spreadPips=GetCurrentSpreadPips();
 
-   // Title row
-   DashLabelUpdate("ACC_TYPE", g_isCentAcct?"CENT (USC)":"STANDARD (USD)",
-                   g_isCentAcct?clrYellow:clrLime);
+   DashLabelUpdate("ACC_TYPE",g_isCentAcct?"CENT (USC)":"STANDARD (USD)",g_isCentAcct?clrYellow:clrLime);
 
-   // Signal mode
-   bool exLow=curRSI>0&&curRSI<=InpExtremeRSILow;
+   // News filter indicator — shows event name in red when active, blank when clear
+   if(g_newsActive)
+      DashLabelUpdate("NEWS_V", g_newsEventName, clrRed);
+   else if(g_bullDivergence)
+      DashLabelUpdate("NEWS_V", "🟢DIV", clrAqua);
+   else if(g_bearDivergence)
+      DashLabelUpdate("NEWS_V", "🔴DIV", clrOrange);
+   else
+      DashLabelUpdate("NEWS_V", "", clrRed);
+
+   // Signal mode — now includes regime info
+   bool exLow =curRSI>0&&curRSI<=InpExtremeRSILow;
    bool exHigh=curRSI>0&&curRSI>=InpExtremeRSIHigh;
-   if(exLow)       DashLabelUpdate("MODE_V","⚡ EXTREME BUY",  clrAqua);
-   else if(exHigh) DashLabelUpdate("MODE_V","⚡ EXTREME SELL", clrOrange);
-   else            DashLabelUpdate("MODE_V","NORMAL (Trend ON)",clrLime);
-
-   // RSI — big and colored
-   color rsiClr = curRSI<=30?clrAqua : curRSI>=70?clrOrange : clrWhite;
-   DashLabelUpdate("RSI_V", DoubleToString(curRSI,1), rsiClr);
-
-   // Status
-   string stTxt = g_recoveryMode?"RECOVERY":g_lastGridWasProfitable?"RE-ENTRY":"READY";
-   color  stClr = g_recoveryMode?clrOrange:g_lastGridWasProfitable?clrAqua:clrLime;
-   DashLabelUpdate("STA_V", stTxt, stClr);
-
-   // Spread
-   color sprClr = spreadPips>InpMaxSpreadPips?clrRed:clrLime;
-   DashLabelUpdate("S_SPRV", DoubleToString(spreadPips,1)+" pips", sprClr);
-
-   // Daily/Weekly
+   if(g_newsActive)
+      DashLabelUpdate("MODE_V","📰 NEWS PAUSE", clrRed);
+   else if(exLow)
+      DashLabelUpdate("MODE_V","⚡ EXTREME BUY",  clrAqua);
+   else if(exHigh)
+      DashLabelUpdate("MODE_V","⚡ EXTREME SELL", clrOrange);
+   else if(g_marketRegime==2)
+      DashLabelUpdate("MODE_V","🔥 EXTREME TREND", clrOrange);
+   else if(g_marketRegime==1)
+      DashLabelUpdate("MODE_V","📈 TRENDING", clrYellow);
+   else
+      DashLabelUpdate("MODE_V","NORMAL (Trend ON)",clrLime);
+   color rsiClr=curRSI<=30?clrAqua:curRSI>=70?clrOrange:clrWhite;
+   DashLabelUpdate("RSI_V",DoubleToString(curRSI,1),rsiClr);
+   string stTxt=g_recoveryMode?"RECOVERY":g_lastGridWasProfitable?"RE-ENTRY":"READY";
+   color  stClr=g_recoveryMode?clrOrange:g_lastGridWasProfitable?clrAqua:clrLime;
+   DashLabelUpdate("STA_V",stTxt,stClr);
+   color sprClr=spreadPips>InpMaxSpreadPips?clrRed:clrLime;
+   DashLabelUpdate("S_SPRV",DoubleToString(spreadPips,1)+" pips",sprClr);
    color dc=(dailyPnL>=0)?clrLime:clrRed; string ds=(dailyPnL>=0)?"+":"";
-   DashLabelUpdate("D_VAL", ds+DoubleToString(dPct,2)+"% | "+ds+DoubleToString(dailyPnL,2)+" "+g_currency, dc);
+   DashLabelUpdate("D_VAL",ds+DoubleToString(dPct,2)+"% | "+ds+DoubleToString(dailyPnL,2)+" "+g_currency,dc);
    color wc=(weeklyPnL>=0)?clrLime:clrRed; string ws=(weeklyPnL>=0)?"+":"";
-   DashLabelUpdate("W_VAL", ws+DoubleToString(wPct,2)+"% | "+ws+DoubleToString(weeklyPnL,2)+" "+g_currency, wc);
-
-   // Live trades — big numbers
-   DashLabelUpdate("T_BUY_V", IntegerToString(buys),  buys>0?clrLime:clrSilver);
-   DashLabelUpdate("T_SEL_V", IntegerToString(sells), sells>0?clrRed:clrSilver);
+   DashLabelUpdate("W_VAL",ws+DoubleToString(wPct,2)+"% | "+ws+DoubleToString(weeklyPnL,2)+" "+g_currency,wc);
+   DashLabelUpdate("T_BUY_V",IntegerToString(buys), buys>0?clrLime:clrSilver);
+   DashLabelUpdate("T_SEL_V",IntegerToString(sells),sells>0?clrRed:clrSilver);
    color plc=(floatPnL>=0)?clrLime:clrRed; string pls=(floatPnL>=0)?"+":"";
-   DashLabelUpdate("T_PL_V", pls+DoubleToString(floatPnL,2)+" "+g_currency, plc);
-
-   // Settings
-   string lotDisp = DoubleToString(g_activeLot,2)+(InpUseDynamicLot?" AUTO":" MANUAL");
-   DashLabelUpdate("S_LV",  lotDisp,                                                   InpUseDynamicLot?clrAqua:clrYellow);
-   DashLabelUpdate("S_SV",  DoubleToString(g_spacingPips,0)+" pips",                   clrYellow);
-   DashLabelUpdate("S_RV",  DoubleToString(g_rsiBuyLvl,0)+"/"+DoubleToString(g_rsiSellLvl,0), clrYellow);
-   DashLabelUpdate("S_MV",  DoubleToString(g_maxProfitMult,0)+"x",                     clrYellow);
-   DashLabelUpdate("S_SLV", DoubleToString(g_gridSLMult,0)+"x",                        clrYellow);
+   DashLabelUpdate("T_PL_V",pls+DoubleToString(floatPnL,2)+" "+g_currency,plc);
+   string lotDisp=DoubleToString(g_activeLot,2)+(InpUseDynamicLot?" AUTO":" MAN");
+   DashLabelUpdate("S_LV",  lotDisp,                                                    InpUseDynamicLot?clrAqua:clrYellow);
+   DashLabelUpdate("S_SV",  DoubleToString(g_spacingPips,0)+"p",                        clrYellow);
+   DashLabelUpdate("S_RV",  DoubleToString(g_rsiBuyLvl,0)+"/"+DoubleToString(g_rsiSellLvl,0),clrYellow);
+   DashLabelUpdate("S_MV",  DoubleToString(g_maxProfitMult,0)+"x",                      clrYellow);
+   DashLabelUpdate("S_SLV", DoubleToString(g_gridSLMult,0)+"x",                         clrYellow);
    color adxClr=curADX<InpADX_Weak?clrRed:curADX>InpADX_Strong?clrLime:clrYellow;
-   DashLabelUpdate("S_ADXV",DoubleToString(curADX,1),                                  adxClr);
-
+   DashLabelUpdate("S_ADXV",DoubleToString(curADX,1),                                   adxClr);
+   DashLabelUpdate("S_GRV", IntegerToString(g_gridSize)+" ord",                         clrYellow);
    ChartRedraw(0);
 }
+
 
 void DashRect(string n,int x,int y,int w,int h,color bg,color brd,int t)
 {
