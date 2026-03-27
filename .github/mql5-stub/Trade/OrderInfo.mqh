@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //| OrderInfo.mqh — COrderInfo stub for CI compilation              |
-//| Compatible with all EAs: v2, v3, GoldSniper Pro v2              |
+//| Compatible with all EAs including TuyulGoldScalper v1           |
 //+------------------------------------------------------------------+
 #ifndef __ORDER_INFO_MQH__
 #define __ORDER_INFO_MQH__
@@ -25,7 +25,12 @@ public:
    double SL()      { return OrderGetDouble(ORDER_SL);             }
    double TP()      { return OrderGetDouble(ORDER_TP);             }
 
+   // Type() and OrderType() both return the same value
+   // OrderType() added for compatibility with TuyulGoldScalper and similar EAs
    ENUM_ORDER_TYPE Type()
+   { return (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE); }
+
+   ENUM_ORDER_TYPE OrderType()
    { return (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE); }
 };
 
