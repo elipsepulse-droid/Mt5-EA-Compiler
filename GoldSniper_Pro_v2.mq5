@@ -408,7 +408,7 @@ void ManageOpenPositions()
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      if(!PositionSelectByIndex(i))                               continue;
+      if(PositionGetTicket(i) == 0)                               continue;
       if(PositionGetString(POSITION_SYMBOL)  != _Symbol)          continue;
       if(PositionGetInteger(POSITION_MAGIC)  != (long)MagicNumber) continue;
 
@@ -629,7 +629,7 @@ void UpdateDashboard()
    }
    else if(g_newsBlocked)
    {
-      newsTxt = StringFormat("News: !! BLOCKED !!");
+      newsTxt = "News: !! BLOCKED !!";
       newsClr = clrTomato;
    }
    else
@@ -678,9 +678,11 @@ void DeleteDashboard()
 
 ENUM_ORDER_TYPE_FILLING GetFillMode()
 {
-   uint f = (uint)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_FLAGS);
-   if(f & SYMBOL_FILLING_FOK) return ORDER_FILLING_FOK;
-   if(f & SYMBOL_FILLING_IOC) return ORDER_FILLING_IOC;
+   // SYMBOL_FILLING_FLAGS = enum value 54; cast avoids undeclared identifier on older MT5 builds
+   // SYMBOL_FILLING_FOK = 1 (bit 0), SYMBOL_FILLING_IOC = 2 (bit 1)
+   long f = SymbolInfoInteger(_Symbol, (ENUM_SYMBOL_INFO_INTEGER)54);
+   if((f & 1) != 0) return ORDER_FILLING_FOK;
+   if((f & 2) != 0) return ORDER_FILLING_IOC;
    return ORDER_FILLING_RETURN;
 }
 
