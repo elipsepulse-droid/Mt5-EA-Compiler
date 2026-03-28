@@ -87,6 +87,52 @@ public:
       return SendOrder(req);
    }
 
+   bool BuyStop(double volume, double price, string symbol=NULL,
+               double sl=0, double tp=0,
+               ENUM_ORDER_TYPE_TIME type_time=ORDER_TIME_GTC,
+               datetime expiration=0, string comment=NULL)
+   {
+      if(symbol == NULL) symbol = _Symbol;
+      MqlTradeRequest req; ZeroMemory(req);
+      req.action       = TRADE_ACTION_PENDING;
+      req.symbol       = symbol;
+      req.volume       = volume;
+      req.type         = ORDER_TYPE_BUY_STOP;
+      req.price        = price;
+      req.sl           = sl;
+      req.tp           = tp;
+      req.deviation    = m_deviation;
+      req.magic        = m_magic;
+      req.type_time    = type_time;
+      req.expiration   = expiration;
+      req.type_filling = m_filling;
+      if(comment != NULL) req.comment = comment;
+      return SendOrder(req);
+   }
+
+   bool SellStop(double volume, double price, string symbol=NULL,
+                 double sl=0, double tp=0,
+                 ENUM_ORDER_TYPE_TIME type_time=ORDER_TIME_GTC,
+                 datetime expiration=0, string comment=NULL)
+   {
+      if(symbol == NULL) symbol = _Symbol;
+      MqlTradeRequest req; ZeroMemory(req);
+      req.action       = TRADE_ACTION_PENDING;
+      req.symbol       = symbol;
+      req.volume       = volume;
+      req.type         = ORDER_TYPE_SELL_STOP;
+      req.price        = price;
+      req.sl           = sl;
+      req.tp           = tp;
+      req.deviation    = m_deviation;
+      req.magic        = m_magic;
+      req.type_time    = type_time;
+      req.expiration   = expiration;
+      req.type_filling = m_filling;
+      if(comment != NULL) req.comment = comment;
+      return SendOrder(req);
+   }
+
    bool BuyLimit(double volume, double price, string symbol=NULL,
                  double sl=0, double tp=0,
                  ENUM_ORDER_TYPE_TIME type_time=ORDER_TIME_GTC,
