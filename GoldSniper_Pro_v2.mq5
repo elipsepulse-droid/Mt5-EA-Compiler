@@ -257,7 +257,7 @@ void ManageOpenPositions()
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      if(!PositionSelectByIndex(i)) continue;
+      ulong _tk = PositionGetTicket(i); if(_tk == 0 || !PositionSelectByTicket(_tk)) continue;
       if(PositionGetString(POSITION_SYMBOL)  != _Symbol)           continue;
       if(PositionGetInteger(POSITION_MAGIC)  != (long)MagicNumber) continue;
 
@@ -329,7 +329,7 @@ void ManageOpenPositions()
 // [FIX #2] Detect broker-supported filling mode for this symbol
 ENUM_ORDER_TYPE_FILLING GetFillMode()
 {
-   uint flags = (uint)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_FLAGS);
+   uint flags = (uint)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
    if((flags & SYMBOL_FILLING_FOK) != 0) return ORDER_FILLING_FOK;
    if((flags & SYMBOL_FILLING_IOC) != 0) return ORDER_FILLING_IOC;
    return ORDER_FILLING_RETURN;
