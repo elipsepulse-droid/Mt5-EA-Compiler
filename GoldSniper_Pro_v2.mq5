@@ -11,7 +11,7 @@
 //   v2.1 used SYMBOL_FILLING_MODE which does NOT exist in MQL5.
 //   This returned 0 → all bits false → forced ORDER_FILLING_RETURN.
 //   On some brokers this causes silent order rejection.
-//   FIX: Use SYMBOL_FILLING_FLAGS (correct MQL5 property).
+//   FIX: Use SYMBOL_FILLING_MODE (correct MQL5 property).
 //
 // BUG 2 — PendingExpireBars = 3 caused "chasing range" loop
 //   Every 3 bars orders were DELETED and re-placed at the NEW range.
@@ -169,7 +169,7 @@ string   g_blockReason     = "";
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   // [BUG1 FIX] Use SYMBOL_FILLING_FLAGS (correct MQL5 property)
+   // [BUG1 FIX] Use SYMBOL_FILLING_MODE (correct MQL5 property)
    ENUM_ORDER_TYPE_FILLING fill = GetFillMode();
    Trade.SetTypeFilling(fill);
    Trade.SetExpertMagicNumber((ulong)MagicNumber);
@@ -438,7 +438,7 @@ void ManageOpenPositions()
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      if(!PositionSelectByIndex(i))                                continue;
+      ulong _ptk=PositionGetTicket(i); if(_ptk==0||!PositionSelectByTicket(_ptk))                                continue;
       if(PositionGetString(POSITION_SYMBOL)  != _Symbol)           continue;
       if(PositionGetInteger(POSITION_MAGIC)  != (long)MagicNumber) continue;
 
@@ -501,22 +501,24 @@ void RefreshNewsFilter()
    MqlCalendarValue vals[];
    int cnt = CalendarValueHistory(vals, from, to, "US");
    if(cnt <= 0) cnt = CalendarValueHistory(vals, from, to, NULL, "USD");
-   if(cnt <= 0) goto LOOKAHEAD;
 
-   for(int i = 0; i < cnt; i++)
+   if(cnt > 0)
    {
-      MqlCalendarEvent ev;
-      if(!CalendarEventById(vals[i].event_id, ev)) continue;
-      bool hi  = (ev.importance == CALENDAR_IMPORTANCE_HIGH);
-      bool mod = (ev.importance == CALENDAR_IMPORTANCE_MODERATE);
-      if(!hi && !(NewsFilterModerate && mod)) continue;
-      g_newsBlocked   = true;
-      g_newsEventName = ev.name;
-      g_newsEventTime = vals[i].time;
-      return;
+      for(int i = 0; i < cnt; i++)
+      {
+         MqlCalendarEvent ev;
+         if(!CalendarEventById(vals[i].event_id, ev)) continue;
+         bool hi  = (ev.importance == CALENDAR_IMPORTANCE_HIGH);
+         bool mod = (ev.importance == CALENDAR_IMPORTANCE_MODERATE);
+         if(!hi && !(NewsFilterModerate && mod)) continue;
+         g_newsBlocked   = true;
+         g_newsEventName = ev.name;
+         g_newsEventTime = vals[i].time;
+         return;
+      }
    }
 
-   LOOKAHEAD:
+   // Lookahead — find next upcoming event in next 4 hours:
    MqlCalendarValue nv[];
    int nc = CalendarValueHistory(nv, TimeCurrent(),
                                  TimeCurrent() + 4*3600, "US");
@@ -692,10 +694,10 @@ void DeleteDashboard()
 //  HELPERS
 //+------------------------------------------------------------------+
 
-// [BUG1 FIX] Correct MQL5 property: SYMBOL_FILLING_FLAGS
+// [BUG1 FIX] Correct MQL5 property: SYMBOL_FILLING_MODE
 ENUM_ORDER_TYPE_FILLING GetFillMode()
 {
-   uint f = (uint)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_FLAGS);
+   uint f = (uint)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
    if(f & SYMBOL_FILLING_FOK) return ORDER_FILLING_FOK;
    if(f & SYMBOL_FILLING_IOC) return ORDER_FILLING_IOC;
    return ORDER_FILLING_RETURN;
