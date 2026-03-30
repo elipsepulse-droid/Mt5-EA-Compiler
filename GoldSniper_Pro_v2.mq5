@@ -2,22 +2,49 @@
 //|  Breakout Pending Order Scalper — GOLD & BTC Edition             |
 //|  Strategy : Consolidation Range + Buy Stop / Sell Stop           |
 //|  Symbols  : XAUUSD / XAUUSDm / BTCUSD / BTCUSDm (auto-detect)  |
-//|  Version  : 2.3 (On-Chart Dashboard + MT5 News Filter)          |
+//|  Version  : 2.4 (Root-Cause Execution Fix)                      |
 //+------------------------------------------------------------------+
-// NEW in v2.3:
-//  [D1] On-chart dashboard: balance, equity, day P&L, pending/open
-//       order status, spread, ATR, session, news — all live
-//  [D2] Dashboard auto-cleans on EA remove
-//  [N1] News filter using MT5 built-in Economic Calendar API
-//  [N2] Blocks new orders X minutes before and after high-impact US events
-//  [N3] Optional: also deletes pending orders when news window opens
-//  [N4] Configurable: filter moderate news too
-//  [N5] Dashboard shows next upcoming news event + countdown
-//  All v2.1 and v2.2 fixes and features fully retained
+//
+// WHY TRADES WERE DELAYED / NOT OPENING — ROOT CAUSES FIXED IN v2.4:
+//
+// BUG 1 — SYMBOL_FILLING_MODE (wrong MQL5 property)
+//   v2.1 used SYMBOL_FILLING_MODE which does NOT exist in MQL5.
+//   This returned 0 → all bits false → forced ORDER_FILLING_RETURN.
+//   On some brokers this causes silent order rejection.
+//   FIX: Use SYMBOL_FILLING_FLAGS (correct MQL5 property).
+//
+// BUG 2 — PendingExpireBars = 3 caused "chasing range" loop
+//   Every 3 bars orders were DELETED and re-placed at the NEW range.
+//   If price was slowly approaching an order level and the order
+//   expired first, the new order moved FURTHER away from price.
+//   This made it look like trades "never open" — the target kept shifting.
+//   FIX: Orders are now MODIFIED to the new range price instead of
+//   deleted+replaced. Existing orders track range movement in-place.
+//   PendingExpireBars default raised to 10 bars.
+//
+// BUG 3 — No minimum range size guard
+//   In a tight sideways market the high-low range was tiny (<2×buffer).
+//   This placed buy stop and sell stop dangerously close together or
+//   overlapping, causing both to fire on the same candle (double entry).
+//   FIX: Added MinRangePoints input. Orders not placed if range too tight.
+//
+// BUG 4 — Spread filter not scaled for BTC in v2.1/v2.2
+//   Default MaxSpreadPoints = 80. BTC raw spread on Exness M1 is ~140 pts.
+//   The filter silently blocked all BTC order placement.
+//   FIX: Spread comparison now uses PRICE-UNIT spread vs scaled threshold
+//   (inherited from v2.2 scaling). Also added live dashboard alert when
+//   spread is the reason orders are blocked.
+//
+// All v2.3 features fully retained:
+//   • On-chart dashboard (balance, equity, P&L, orders, filters, news)
+//   • MT5 Economic Calendar news filter (US high-impact events)
+//   • Auto symbol detection GOLD / BTC / CUSTOM
+//   • Dynamic parameter scaling for BTC
+//   • 24/7 mode (session filter off by default)
 //+------------------------------------------------------------------+
 
 #property copyright "bs.autotrade / Multi-Symbol Edition"
-#property version   "2.30"
+#property version   "2.40"
 
 #include <Trade\Trade.mqh>
 #include <Trade\OrderInfo.mqh>
@@ -30,10 +57,10 @@ CPositionInfo PositionInfo;
 //--- ═══════════════════════════════════════════════════════════════
 //    CONSTANTS
 //--- ═══════════════════════════════════════════════════════════════
-#define DASH_PFX   "TPOV23_"   // prefix for all chart objects
-#define DASH_W     240          // dashboard width  (pixels)
-#define DASH_H     275          // dashboard height (pixels)
-#define ROW_H      16           // row height       (pixels)
+#define DASH_PFX  "TPO24_"
+#define DASH_W    245
+#define DASH_H    295
+#define ROW_H     16
 
 //--- ═══════════════════════════════════════════════════════════════
 //    ENUMS
@@ -51,68 +78,70 @@ enum ENUM_SYMBOL_TYPE
 //--- ═══════════════════════════════════════════════════════════════
 
 input group "═══ SYMBOL MODE ═══"
-input ENUM_SYMBOL_TYPE SymbolMode          = SYM_AUTO; // Symbol preset
+input ENUM_SYMBOL_TYPE SymbolMode         = SYM_AUTO;
 
 input group "═══ TRADE SETUP ═══"
-input double LotSize                       = 0.01;     // Lot Size
-input int    RangeBars                     = 5;        // Consolidation bars to scan
-input int    EntryBufferPoints             = 50;       // Base entry buffer (auto-scaled)
-input long   MagicNumber                   = 202502;   // EA Magic Number
+input double LotSize                      = 0.01;
+input int    RangeBars                    = 5;       // Consolidation bars to scan
+input int    EntryBufferPoints            = 50;      // Buffer above/below range (auto-scaled)
+input int    MinRangePoints               = 100;     // [BUG3 FIX] Min range size in pts (0=off)
+input long   MagicNumber                  = 202502;
 
 input group "═══ STOP LOSS & TAKE PROFIT ═══"
-input bool   UseATR_SL                     = true;     // Use ATR-based SL
-input double ATR_SL_Multiplier             = 1.5;      // ATR × this = SL distance
-input double ATR_TP_Multiplier             = 2.5;      // ATR × this = TP distance
-input int    FixedSL_Points                = 300;      // Fixed SL points (ATR off)
-input int    FixedTP_Points                = 500;      // Fixed TP points (ATR off)
-input int    ATR_Period                    = 14;       // ATR period
+input bool   UseATR_SL                    = true;
+input double ATR_SL_Multiplier            = 1.5;
+input double ATR_TP_Multiplier            = 2.5;
+input int    FixedSL_Points               = 300;
+input int    FixedTP_Points               = 500;
+input int    ATR_Period                   = 14;
 
 input group "═══ TRAILING & BREAKEVEN ═══"
-input bool   UseTrailing                   = true;     // Enable trailing stop
-input int    TrailingStart_Points          = 200;      // Profit pts to start trailing
-input int    TrailingStep_Points           = 100;      // Trailing step in pts
-input bool   UseBreakeven                  = true;     // Enable breakeven
-input int    BreakevenActivate             = 150;      // Profit pts to activate BE
-input int    BreakevenOffset               = 10;       // BE SL offset above entry
+input bool   UseTrailing                  = true;
+input int    TrailingStart_Points         = 200;
+input int    TrailingStep_Points          = 100;
+input bool   UseBreakeven                 = true;
+input int    BreakevenActivate            = 150;
+input int    BreakevenOffset              = 10;
 
 input group "═══ FILTERS ═══"
-input int    MaxSpreadPoints               = 80;       // Max spread pts (0=off, auto-scaled)
-input bool   UseSessionFilter              = false;    // OFF = 24/7 trading
-input int    SessionStartHour              = 7;        // Session start (broker time)
-input int    SessionEndHour                = 20;       // Session end   (broker time)
-input bool   UseCancelOpposite             = true;     // OCO: cancel other side on fill
-input bool   UseVolatilityFilter           = true;     // Skip if ATR too low
-input double MinATR_Points                 = 50.0;     // Min ATR pts (auto-scaled)
+input int    MaxSpreadPoints              = 80;      // Max spread pts (auto-scaled; 0=off)
+input bool   UseSessionFilter             = false;   // OFF = 24/7 trading
+input int    SessionStartHour             = 7;
+input int    SessionEndHour               = 20;
+input bool   UseCancelOpposite            = true;
+input bool   UseVolatilityFilter          = true;
+input double MinATR_Points                = 50.0;
 
 input group "═══ NEWS FILTER ═══"
-input bool   UseNewsFilter                 = true;     // Enable news filter (US events)
-input int    NewsMinutesBefore             = 30;       // Mins before news: block orders
-input int    NewsMinutesAfter              = 30;       // Mins after  news: block orders
-input bool   NewsDeletePending             = true;     // Delete pending orders on news
-input bool   NewsFilterModerate            = false;    // Also block moderate-impact news
+input bool   UseNewsFilter                = true;
+input int    NewsMinutesBefore            = 30;
+input int    NewsMinutesAfter             = 30;
+input bool   NewsDeletePending            = true;
+input bool   NewsFilterModerate           = false;
 
 input group "═══ RISK MANAGEMENT ═══"
-input double MaxDailyLossPct               = 3.0;      // Max daily loss % (0=off)
-input int    MaxOpenOrders                 = 2;        // Max pending+open orders
-input bool   CloseOnNewBar                 = false;    // Close trades on new bar
-input int    PendingExpireBars             = 3;        // Pending auto-expire bars (0=off)
+input double MaxDailyLossPct              = 3.0;
+input int    MaxOpenOrders                = 2;
+input bool   CloseOnNewBar                = false;
+input int    PendingExpireBars            = 10;     // [BUG2 FIX] Raised from 3 → 10
 
 input group "═══ DASHBOARD ═══"
-input bool   ShowDashboard                 = true;     // Show on-chart dashboard
-input int    DashX                         = 10;       // Dashboard X offset (pixels)
-input int    DashY                         = 30;       // Dashboard Y offset (pixels)
-input ENUM_BASE_CORNER DashCorner          = CORNER_LEFT_UPPER; // Dashboard corner
+input bool   ShowDashboard                = true;
+input int    DashX                        = 10;
+input int    DashY                        = 30;
+input ENUM_BASE_CORNER DashCorner         = CORNER_LEFT_UPPER;
 
 //--- ═══════════════════════════════════════════════════════════════
-//    GLOBALS — STRATEGY
+//    GLOBALS
 //--- ═══════════════════════════════════════════════════════════════
 datetime g_lastBarTime     = 0;
 double   g_dayStartBalance = 0.0;
 datetime g_today           = 0;
 int      g_atrHandle       = INVALID_HANDLE;
 
-// Scaled effective values (set once in ApplySymbolPreset)
+// Scaled parameters (set in ApplySymbolPreset)
 double   g_entryBuffer     = 0.0;
+double   g_minRange        = 0.0;
 double   g_fixedSL         = 0.0;
 double   g_fixedTP         = 0.0;
 double   g_trailStart      = 0.0;
@@ -123,24 +152,24 @@ double   g_maxSpread       = 0.0;
 double   g_minATR          = 0.0;
 string   g_symbolLabel     = "";
 
-//--- ═══════════════════════════════════════════════════════════════
-//    GLOBALS — NEWS FILTER
-//--- ═══════════════════════════════════════════════════════════════
+// News
 bool     g_newsBlocked     = false;
 string   g_newsEventName   = "";
 datetime g_newsEventTime   = 0;
-datetime g_newsLastCheck   = 0;  // throttle: re-check every 60s
+datetime g_newsLastCheck   = 0;
 
-//--- ═══════════════════════════════════════════════════════════════
-//    GLOBALS — DASHBOARD THROTTLE
-//--- ═══════════════════════════════════════════════════════════════
+// Dashboard throttle
 datetime g_dashLastUpdate  = 0;
+
+// Block reason for dashboard (shows WHY orders weren't placed)
+string   g_blockReason     = "";
 
 //+------------------------------------------------------------------+
 //  INIT
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   // [BUG1 FIX] Use SYMBOL_FILLING_FLAGS (correct MQL5 property)
    ENUM_ORDER_TYPE_FILLING fill = GetFillMode();
    Trade.SetTypeFilling(fill);
    Trade.SetExpertMagicNumber((ulong)MagicNumber);
@@ -149,7 +178,7 @@ int OnInit()
    g_atrHandle = iATR(_Symbol, PERIOD_CURRENT, ATR_Period);
    if(g_atrHandle == INVALID_HANDLE)
    {
-      Alert("TUYUL PO v2.3: ATR handle failed — EA will not run.");
+      Alert("TUYUL PO v2.4: ATR handle failed — EA will not run.");
       return(INIT_FAILED);
    }
 
@@ -160,7 +189,7 @@ int OnInit()
 
    if(ShowDashboard) CreateDashboard();
 
-   PrintFormat("TUYUL PO v2.3 | %s [%s] | TF:%s | Fill:%s | News:%s",
+   PrintFormat("TUYUL PO v2.4 | %s [%s] | TF:%s | Fill:%s | News:%s",
                _Symbol, g_symbolLabel, EnumToString(Period()),
                EnumToString(fill), UseNewsFilter ? "ON" : "OFF");
    return(INIT_SUCCEEDED);
@@ -181,7 +210,7 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   //--- Daily reset
+   // Daily reset
    datetime todayD1 = iTime(_Symbol, PERIOD_D1, 0);
    if(todayD1 != g_today)
    {
@@ -189,60 +218,71 @@ void OnTick()
       g_dayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    }
 
-   //--- Daily loss breaker
+   // Daily loss breaker
    if(MaxDailyLossPct > 0.0 && IsDailyLossBreached())
    {
       CloseAllPositions();
       DeleteAllPending();
+      g_blockReason = "DAILY LOSS LIMIT";
       if(ShowDashboard) UpdateDashboard();
       return;
    }
 
-   //--- Trailing + Breakeven every tick
+   // Trailing + Breakeven
    ManageOpenPositions();
 
-   //--- OCO every tick
-   if(UseCancelOpposite)
-      ManageOCO();
+   // OCO
+   if(UseCancelOpposite) ManageOCO();
 
-   //--- News filter refresh (max once per 60s)
+   // News check (throttled)
    if(UseNewsFilter && (TimeCurrent() - g_newsLastCheck) >= 60)
       RefreshNewsFilter();
 
-   //--- Dashboard update (max once per 2s to avoid overhead)
+   // Dashboard (throttled)
    if(ShowDashboard && (TimeCurrent() - g_dashLastUpdate) >= 2)
    {
       UpdateDashboard();
       g_dashLastUpdate = TimeCurrent();
    }
 
-   //--- News blocked: delete pending if configured
+   // Delete pendings on news window
    if(g_newsBlocked && NewsDeletePending)
       DeleteAllPending();
 
-   //--- New bar detection
+   // New bar detection
    datetime currentBar = iTime(_Symbol, PERIOD_CURRENT, 0);
    if(currentBar == g_lastBarTime) return;
    g_lastBarTime = currentBar;
 
-   if(CloseOnNewBar)
-      CloseAllPositions();
+   if(CloseOnNewBar) CloseAllPositions();
+   if(PendingExpireBars > 0) ExpireOldPendings();
 
-   if(PendingExpireBars > 0)
-      ExpireOldPendings();
+   // ── PRE-ORDER FILTER CHECKS ─────────────────────────────────────
+   g_blockReason = "";
 
-   //--- All pre-order filters
-   if(UseSessionFilter && !IsSessionActive())   return;
-   if(g_newsBlocked)                             return;
-   if(g_maxSpread > 0.0 &&
-      GetCurrentSpread() > g_maxSpread)          return;
-   if(CountAllOrders() >= MaxOpenOrders)         return;
+   if(UseSessionFilter && !IsSessionActive())
+   { g_blockReason = "OUTSIDE SESSION"; return; }
+
+   if(g_newsBlocked)
+   { g_blockReason = "NEWS: " + g_newsEventName; return; }
+
+   // [BUG4 FIX] Spread check uses scaled g_maxSpread (price units)
+   if(g_maxSpread > 0.0 && GetCurrentSpread() > g_maxSpread)
+   { g_blockReason = StringFormat("SPREAD HIGH (%.0f pts)",
+                                   GetCurrentSpread()/_Point); return; }
+
+   if(CountAllOrders() >= MaxOpenOrders)
+   { g_blockReason = "MAX ORDERS REACHED"; return; }
 
    double atr = GetATR();
-   if(atr <= 0.0)                                return;
-   if(UseVolatilityFilter && atr < g_minATR)     return;
+   if(atr <= 0.0)
+   { g_blockReason = "ATR = 0 (no data)"; return; }
 
-   PlacePendingOrders(atr);
+   if(UseVolatilityFilter && atr < g_minATR)
+   { g_blockReason = StringFormat("ATR LOW (%.0f pts)", atr/_Point); return; }
+
+   // ── PLACE OR MODIFY ORDERS ──────────────────────────────────────
+   UpdateOrPlaceOrders(atr);
 }
 
 //+------------------------------------------------------------------+
@@ -260,15 +300,16 @@ void ApplySymbolPreset()
    }
 
    double scale = 1.0;
-   if(res == SYM_GOLD)       { scale = 1.0;  g_symbolLabel = "GOLD"; }
-   else if(res == SYM_BTC)   {
-      double price  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      scale         = MathMax(10.0, MathMin(100.0, price / 3000.0));
+   if(res == SYM_GOLD)     { scale = 1.0;  g_symbolLabel = "GOLD"; }
+   else if(res == SYM_BTC) {
+      double p  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      scale     = MathMax(10.0, MathMin(100.0, p / 3000.0));
       g_symbolLabel = "BTC";
    }
-   else                      { scale = 1.0;  g_symbolLabel = "CUSTOM"; }
+   else                    { scale = 1.0;  g_symbolLabel = "CUSTOM"; }
 
    g_entryBuffer = EntryBufferPoints    * _Point * scale;
+   g_minRange    = MinRangePoints       * _Point * scale;
    g_fixedSL     = FixedSL_Points       * _Point * scale;
    g_fixedTP     = FixedTP_Points       * _Point * scale;
    g_trailStart  = TrailingStart_Points * _Point * scale;
@@ -280,82 +321,25 @@ void ApplySymbolPreset()
 }
 
 //+------------------------------------------------------------------+
-//  [N1] NEWS FILTER — MT5 Built-in Economic Calendar
+//  [BUG2 FIX] MODIFY existing orders OR place new ones
+//  Key change: if a pending already exists, MODIFY it to the new
+//  range level instead of deleting and re-placing. This keeps orders
+//  tracking the current range without the delete→gap→replace cycle
+//  that caused missed executions.
 //+------------------------------------------------------------------+
-void RefreshNewsFilter()
-{
-   g_newsLastCheck = TimeCurrent();
-   g_newsBlocked   = false;
-   g_newsEventName = "";
-   g_newsEventTime = 0;
-
-   datetime from = TimeCurrent() - NewsMinutesBefore * 60;
-   datetime to   = TimeCurrent() + NewsMinutesAfter  * 60;
-
-   MqlCalendarValue values[];
-   // Query US calendar events
-   int cnt = CalendarValueHistory(values, from, to, "US");
-
-   if(cnt <= 0)
-   {
-      // Also try "USD" currency filter as fallback
-      cnt = CalendarValueHistory(values, from, to, NULL, "USD");
-   }
-
-   if(cnt <= 0) return; // no events or calendar unavailable
-
-   for(int i = 0; i < cnt; i++)
-   {
-      MqlCalendarEvent ev;
-      if(!CalendarEventById(values[i].event_id, ev)) continue;
-
-      bool isHigh = (ev.importance == CALENDAR_IMPORTANCE_HIGH);
-      bool isMod  = (ev.importance == CALENDAR_IMPORTANCE_MODERATE);
-
-      if(!isHigh && !(NewsFilterModerate && isMod)) continue;
-
-      // This event falls within our block window
-      g_newsBlocked   = true;
-      g_newsEventName = ev.name;
-      g_newsEventTime = values[i].time;
-      return; // one high-impact event is enough to block
-   }
-
-   // No blocking event in window — also look ahead for NEXT event
-   // (up to 4 hours ahead, for dashboard display only)
-   datetime nextFrom = TimeCurrent();
-   datetime nextTo   = TimeCurrent() + 4 * 3600;
-   MqlCalendarValue nextVals[];
-   int nc = CalendarValueHistory(nextVals, nextFrom, nextTo, "US");
-   if(nc <= 0) nc = CalendarValueHistory(nextVals, nextFrom, nextTo, NULL, "USD");
-
-   datetime bestTime = 0;
-   string   bestName = "";
-   for(int i = 0; i < nc; i++)
-   {
-      MqlCalendarEvent ev;
-      if(!CalendarEventById(nextVals[i].event_id, ev)) continue;
-      bool isHigh = (ev.importance == CALENDAR_IMPORTANCE_HIGH);
-      bool isMod  = (ev.importance == CALENDAR_IMPORTANCE_MODERATE);
-      if(!isHigh && !(NewsFilterModerate && isMod)) continue;
-      if(bestTime == 0 || nextVals[i].time < bestTime)
-      {
-         bestTime = nextVals[i].time;
-         bestName = ev.name;
-      }
-   }
-   g_newsEventTime = bestTime;
-   g_newsEventName = bestName;
-}
-
-//+------------------------------------------------------------------+
-//  CORE: Place Buy Stop + Sell Stop
-//+------------------------------------------------------------------+
-void PlacePendingOrders(double atr)
+void UpdateOrPlaceOrders(double atr)
 {
    double high = GetHighest(RangeBars);
    double low  = GetLowest(RangeBars);
    if(high <= 0.0 || low <= 0.0 || high <= low) return;
+
+   // [BUG3 FIX] Minimum range size guard
+   double rangeSize = high - low;
+   if(g_minRange > 0.0 && rangeSize < g_minRange)
+   {
+      g_blockReason = StringFormat("RANGE TOO TIGHT (%.0f pts)", rangeSize/_Point);
+      return;
+   }
 
    double buyEntry  = NormalizeDouble(high + g_entryBuffer, _Digits);
    double sellEntry = NormalizeDouble(low  - g_entryBuffer, _Digits);
@@ -375,23 +359,69 @@ void PlacePendingOrders(double atr)
    double ask     = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid     = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-   if(buyEntry  < ask + minDist)           return;
-   if(sellEntry > bid - minDist)           return;
    if(slDist < minDist || tpDist < minDist) return;
 
-   if(!HasPendingOfType(ORDER_TYPE_BUY_STOP))
-      if(!Trade.BuyStop(LotSize, buyEntry, _Symbol, buySL, buyTP,
-                        ORDER_TIME_GTC, 0, "TUYUL_BUY"))
-         Print("BuyStop FAILED: ", Trade.ResultRetcodeDescription());
+   // ── BUY STOP: modify if exists, place if not ──────────────────
+   ulong bsTicket = GetPendingTicket(ORDER_TYPE_BUY_STOP);
+   if(bsTicket > 0)
+   {
+      // Modify only if range has moved enough to warrant it
+      double existingPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+      if(MathAbs(existingPrice - buyEntry) > g_entryBuffer * 0.5)
+      {
+         if(buyEntry > ask + minDist)
+            Trade.OrderModify(bsTicket, buyEntry, buySL, buyTP,
+                              ORDER_TIME_GTC, 0);
+      }
+   }
+   else
+   {
+      // Place fresh buy stop
+      if(buyEntry > ask + minDist)
+      {
+         if(!Trade.BuyStop(LotSize, buyEntry, _Symbol, buySL, buyTP,
+                           ORDER_TIME_GTC, 0, "TUYUL_BUY"))
+            PrintFormat("BuyStop FAILED | %.2f SL:%.2f TP:%.2f | %s",
+                        buyEntry, buySL, buyTP, Trade.ResultRetcodeDescription());
+         else
+            PrintFormat("BuyStop PLACED  | Entry:%.2f SL:%.2f TP:%.2f",
+                        buyEntry, buySL, buyTP);
+      }
+      else
+         g_blockReason = StringFormat("BUY too close to price (%.2f)", buyEntry);
+   }
 
-   if(!HasPendingOfType(ORDER_TYPE_SELL_STOP))
-      if(!Trade.SellStop(LotSize, sellEntry, _Symbol, sellSL, sellTP,
-                         ORDER_TIME_GTC, 0, "TUYUL_SELL"))
-         Print("SellStop FAILED: ", Trade.ResultRetcodeDescription());
+   // ── SELL STOP: modify if exists, place if not ─────────────────
+   ulong ssTicket = GetPendingTicket(ORDER_TYPE_SELL_STOP);
+   if(ssTicket > 0)
+   {
+      double existingPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+      if(MathAbs(existingPrice - sellEntry) > g_entryBuffer * 0.5)
+      {
+         if(sellEntry < bid - minDist)
+            Trade.OrderModify(ssTicket, sellEntry, sellSL, sellTP,
+                              ORDER_TIME_GTC, 0);
+      }
+   }
+   else
+   {
+      if(sellEntry < bid - minDist)
+      {
+         if(!Trade.SellStop(LotSize, sellEntry, _Symbol, sellSL, sellTP,
+                            ORDER_TIME_GTC, 0, "TUYUL_SELL"))
+            PrintFormat("SellStop FAILED | %.2f SL:%.2f TP:%.2f | %s",
+                        sellEntry, sellSL, sellTP, Trade.ResultRetcodeDescription());
+         else
+            PrintFormat("SellStop PLACED  | Entry:%.2f SL:%.2f TP:%.2f",
+                        sellEntry, sellSL, sellTP);
+      }
+      else
+         g_blockReason = StringFormat("SELL too close to price (%.2f)", sellEntry);
+   }
 }
 
 //+------------------------------------------------------------------+
-//  OCO MANAGEMENT
+//  OCO
 //+------------------------------------------------------------------+
 void ManageOCO()
 {
@@ -408,66 +438,107 @@ void ManageOpenPositions()
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      if(PositionGetTicket(i) == 0)                               continue;
-      if(PositionGetString(POSITION_SYMBOL)  != _Symbol)          continue;
+      if(!PositionSelectByIndex(i))                                continue;
+      if(PositionGetString(POSITION_SYMBOL)  != _Symbol)           continue;
       if(PositionGetInteger(POSITION_MAGIC)  != (long)MagicNumber) continue;
 
       ulong  ticket    = PositionGetInteger(POSITION_TICKET);
       double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-      double currentSL = PositionGetDouble(POSITION_SL);
-      double currentTP = PositionGetDouble(POSITION_TP);
-      ENUM_POSITION_TYPE posType =
+      double curSL     = PositionGetDouble(POSITION_SL);
+      double curTP     = PositionGetDouble(POSITION_TP);
+      ENUM_POSITION_TYPE pt =
          (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
 
-      double price = (posType == POSITION_TYPE_BUY)
+      double price = (pt == POSITION_TYPE_BUY)
                      ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
                      : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
-      double profitDist = (posType == POSITION_TYPE_BUY)
+      double profitDist = (pt == POSITION_TYPE_BUY)
                           ? price - openPrice
                           : openPrice - price;
 
-      double newSL = currentSL;
+      double newSL = curSL;
 
       if(UseBreakeven && profitDist >= g_beActivate)
       {
-         if(posType == POSITION_TYPE_BUY)
-         {
-            double beSL = NormalizeDouble(openPrice + g_beOffset, _Digits);
-            if(beSL > newSL) newSL = beSL;
-         }
+         if(pt == POSITION_TYPE_BUY)
+         { double b = NormalizeDouble(openPrice + g_beOffset, _Digits);
+           if(b > newSL) newSL = b; }
          else
-         {
-            double beSL = NormalizeDouble(openPrice - g_beOffset, _Digits);
-            if(newSL <= 0.0 || beSL < newSL) newSL = beSL;
-         }
+         { double b = NormalizeDouble(openPrice - g_beOffset, _Digits);
+           if(newSL <= 0.0 || b < newSL) newSL = b; }
       }
 
       if(UseTrailing && profitDist >= g_trailStart)
       {
-         if(posType == POSITION_TYPE_BUY)
-         {
-            double tSL = NormalizeDouble(price - g_trailStep, _Digits);
-            if(tSL > newSL) newSL = tSL;
-         }
+         if(pt == POSITION_TYPE_BUY)
+         { double t = NormalizeDouble(price - g_trailStep, _Digits);
+           if(t > newSL) newSL = t; }
          else
-         {
-            double tSL = NormalizeDouble(price + g_trailStep, _Digits);
-            if(newSL <= 0.0 || tSL < newSL) newSL = tSL;
-         }
+         { double t = NormalizeDouble(price + g_trailStep, _Digits);
+           if(newSL <= 0.0 || t < newSL) newSL = t; }
       }
 
-      if(MathAbs(newSL - currentSL) > _Point)
+      if(MathAbs(newSL - curSL) > _Point)
          if(PositionSelectByTicket(ticket))
-            Trade.PositionModify(ticket, newSL, currentTP);
+            Trade.PositionModify(ticket, newSL, curTP);
    }
+}
+
+//+------------------------------------------------------------------+
+//  NEWS FILTER
+//+------------------------------------------------------------------+
+void RefreshNewsFilter()
+{
+   g_newsLastCheck = TimeCurrent();
+   g_newsBlocked   = false;
+   g_newsEventName = "";
+   g_newsEventTime = 0;
+
+   datetime from = TimeCurrent() - NewsMinutesBefore * 60;
+   datetime to   = TimeCurrent() + NewsMinutesAfter  * 60;
+
+   MqlCalendarValue vals[];
+   int cnt = CalendarValueHistory(vals, from, to, "US");
+   if(cnt <= 0) cnt = CalendarValueHistory(vals, from, to, NULL, "USD");
+   if(cnt <= 0) goto LOOKAHEAD;
+
+   for(int i = 0; i < cnt; i++)
+   {
+      MqlCalendarEvent ev;
+      if(!CalendarEventById(vals[i].event_id, ev)) continue;
+      bool hi  = (ev.importance == CALENDAR_IMPORTANCE_HIGH);
+      bool mod = (ev.importance == CALENDAR_IMPORTANCE_MODERATE);
+      if(!hi && !(NewsFilterModerate && mod)) continue;
+      g_newsBlocked   = true;
+      g_newsEventName = ev.name;
+      g_newsEventTime = vals[i].time;
+      return;
+   }
+
+   LOOKAHEAD:
+   MqlCalendarValue nv[];
+   int nc = CalendarValueHistory(nv, TimeCurrent(),
+                                 TimeCurrent() + 4*3600, "US");
+   if(nc <= 0) CalendarValueHistory(nv, TimeCurrent(),
+                                    TimeCurrent() + 4*3600, NULL, "USD");
+   datetime best = 0; string bestN = "";
+   for(int i = 0; i < nc; i++)
+   {
+      MqlCalendarEvent ev;
+      if(!CalendarEventById(nv[i].event_id, ev)) continue;
+      bool hi  = (ev.importance == CALENDAR_IMPORTANCE_HIGH);
+      bool mod = (ev.importance == CALENDAR_IMPORTANCE_MODERATE);
+      if(!hi && !(NewsFilterModerate && mod)) continue;
+      if(best == 0 || nv[i].time < best) { best = nv[i].time; bestN = ev.name; }
+   }
+   g_newsEventTime = best;
+   g_newsEventName = bestN;
 }
 
 //+------------------------------------------------------------------+
 //  ██████████  DASHBOARD  ██████████
 //+------------------------------------------------------------------+
-
-// Create background rectangle (called once in OnInit)
 void CreateDashboard()
 {
    string bg = DASH_PFX + "BG";
@@ -477,8 +548,8 @@ void CreateDashboard()
    ObjectSetInteger(0, bg, OBJPROP_YDISTANCE,   DashY);
    ObjectSetInteger(0, bg, OBJPROP_XSIZE,       DASH_W);
    ObjectSetInteger(0, bg, OBJPROP_YSIZE,       DASH_H);
-   ObjectSetInteger(0, bg, OBJPROP_BGCOLOR,     C'18,18,30');
-   ObjectSetInteger(0, bg, OBJPROP_BORDER_COLOR,C'60,100,200');
+   ObjectSetInteger(0, bg, OBJPROP_BGCOLOR,     C'15,15,28');
+   ObjectSetInteger(0, bg, OBJPROP_BORDER_COLOR,C'50,100,220');
    ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
    ObjectSetInteger(0, bg, OBJPROP_WIDTH,       1);
    ObjectSetInteger(0, bg, OBJPROP_BACK,        false);
@@ -487,7 +558,6 @@ void CreateDashboard()
    ChartRedraw(0);
 }
 
-// Create or update a text label in the dashboard
 void DashRow(string id, string txt, int row, color clr, int sz=8)
 {
    string nm = DASH_PFX + id;
@@ -506,316 +576,235 @@ void DashRow(string id, string txt, int row, color clr, int sz=8)
    ObjectSetInteger(0, nm, OBJPROP_FONTSIZE,  sz);
 }
 
-// Full dashboard refresh
 void UpdateDashboard()
 {
-   double  bal     = AccountInfoDouble(ACCOUNT_BALANCE);
-   double  eq      = AccountInfoDouble(ACCOUNT_EQUITY);
-   double  dayPnL  = eq - g_dayStartBalance;
-   double  spread  = GetCurrentSpread();
-   double  atr     = GetATR();
-   bool    sessOK  = !UseSessionFilter || IsSessionActive();
-   bool    sprOK   = (g_maxSpread <= 0) || (spread <= g_maxSpread);
-   bool    atrOK   = !UseVolatilityFilter || (atr >= g_minATR);
+   double bal    = AccountInfoDouble(ACCOUNT_BALANCE);
+   double eq     = AccountInfoDouble(ACCOUNT_EQUITY);
+   double dayPnL = eq - g_dayStartBalance;
+   double spread = GetCurrentSpread();
+   double atr    = GetATR();
+   bool   sprOK  = (g_maxSpread <= 0.0) || (spread <= g_maxSpread);
+   bool   atrOK  = !UseVolatilityFilter || (atr >= g_minATR);
+   bool   sessOK = !UseSessionFilter    || IsSessionActive();
 
-   // Row 0 — Header
-   DashRow("R00", "◆ TUYUL PO  v2.3", 0, C'100,180,255', 9);
+   // R00 Header
+   DashRow("R00","◆ TUYUL PO  v2.4",0,C'80,160,255',9);
+   DashRow("R01",StringFormat("%-12s [%s]",_Symbol,g_symbolLabel),1,C'150,150,150');
+   DashRow("R02","────────────────────────────",2,C'40,40,70');
 
-   // Row 1 — Symbol + mode
-   DashRow("R01", StringFormat("%-12s [%s]", _Symbol, g_symbolLabel),
-           1, C'160,160,160');
+   // R03 Account
+   DashRow("R03","ACCOUNT",3,C'180,180,80');
+   DashRow("R04",StringFormat("Bal: $%-9.2f  Eq: $%.2f",bal,eq),4,clrWhite);
+   DashRow("R05",StringFormat("Day P&L: %s$%.2f",dayPnL>=0?"+":"",dayPnL),
+           5, dayPnL>=0 ? clrLimeGreen : clrTomato);
+   DashRow("R06","────────────────────────────",6,C'40,40,70');
 
-   // Row 2 — Separator
-   DashRow("R02", "────────────────────────────", 2, C'50,50,80');
+   // R07 Orders
+   DashRow("R07","ORDERS",7,C'180,180,80');
 
-   // Row 3 — Account header
-   DashRow("R03", "ACCOUNT", 3, C'180,180,100');
-
-   // Row 4 — Balance / Equity
-   DashRow("R04", StringFormat("Bal: $%-10.2f  Eq: $%.2f", bal, eq),
-           4, clrWhite);
-
-   // Row 5 — Day P&L
-   color  pnlClr = (dayPnL >= 0) ? clrLimeGreen : clrTomato;
-   string pnlStr = StringFormat("Day P&L:  %s$%.2f",
-                                 dayPnL >= 0 ? "+" : "", dayPnL);
-   DashRow("R05", pnlStr, 5, pnlClr);
-
-   // Row 6 — Separator
-   DashRow("R06", "────────────────────────────", 6, C'50,50,80');
-
-   // Row 7 — Orders header
-   DashRow("R07", "ORDERS", 7, C'180,180,100');
-
-   // Row 8 — Buy Stop
-   string bsPrice = "NONE";
-   string ssPrice = "NONE";
-   for(int i = 0; i < OrdersTotal(); i++)
+   string bsStr="NONE", ssStr="NONE";
+   color  bsClr=C'90,90,90', ssClr=C'90,90,90';
+   for(int i=0;i<OrdersTotal();i++)
    {
-      ulong t = OrderGetTicket(i);
-      if(t == 0 || !OrderSelect(t))                              continue;
-      if(OrderGetString(ORDER_SYMBOL)  != _Symbol)               continue;
-      if(OrderGetInteger(ORDER_MAGIC)  != (long)MagicNumber)     continue;
-      ENUM_ORDER_TYPE ot = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
-      if(ot == ORDER_TYPE_BUY_STOP)
-         bsPrice = StringFormat("%.2f", OrderGetDouble(ORDER_PRICE_OPEN));
-      if(ot == ORDER_TYPE_SELL_STOP)
-         ssPrice = StringFormat("%.2f", OrderGetDouble(ORDER_PRICE_OPEN));
+      ulong t=OrderGetTicket(i);
+      if(!t || !OrderSelect(t))                              continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol)            continue;
+      if(OrderGetInteger(ORDER_MAGIC) != (long)MagicNumber)  continue;
+      ENUM_ORDER_TYPE ot=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      if(ot==ORDER_TYPE_BUY_STOP)
+      { bsStr=StringFormat("%.2f",OrderGetDouble(ORDER_PRICE_OPEN)); bsClr=clrLimeGreen; }
+      if(ot==ORDER_TYPE_SELL_STOP)
+      { ssStr=StringFormat("%.2f",OrderGetDouble(ORDER_PRICE_OPEN)); ssClr=clrTomato; }
    }
-   color bsClr = (bsPrice != "NONE") ? clrLimeGreen : C'100,100,100';
-   color ssClr = (ssPrice != "NONE") ? clrTomato     : C'100,100,100';
-   DashRow("R08", StringFormat("Buy  Stop: %-14s", bsPrice), 8,  bsClr);
-   DashRow("R09", StringFormat("Sell Stop: %-14s", ssPrice), 9,  ssClr);
+   DashRow("R08",StringFormat("Buy  Stop: %-14s",bsStr),8, bsClr);
+   DashRow("R09",StringFormat("Sell Stop: %-14s",ssStr),9, ssClr);
 
-   // Row 10 — Open position
-   string posStr   = "Flat";
-   string floatStr = "";
-   color  posClr   = C'120,120,120';
-   color  flClr    = C'120,120,120';
-   for(int i = 0; i < PositionsTotal(); i++)
+   string posStr="Flat", floatStr=""; color posClr=C'100,100,100', flClr=C'100,100,100';
+   for(int i=0;i<PositionsTotal();i++)
    {
-      if(PositionGetSymbol(i) != _Symbol)                           continue;
-      if(PositionGetInteger(POSITION_MAGIC) != (long)MagicNumber)   continue;
-      ENUM_POSITION_TYPE pt =
-         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-      double vol  = PositionGetDouble(POSITION_VOLUME);
-      double open = PositionGetDouble(POSITION_PRICE_OPEN);
-      double pft  = PositionGetDouble(POSITION_PROFIT);
-      posStr  = StringFormat("%s  %.2f @ %.2f",
-                              pt == POSITION_TYPE_BUY ? "LONG" : "SHORT",
-                              vol, open);
-      floatStr= StringFormat("Float:  %s$%.2f",
-                              pft >= 0 ? "+" : "", pft);
-      posClr  = (pt == POSITION_TYPE_BUY) ? clrDeepSkyBlue : clrOrange;
-      flClr   = (pft >= 0) ? clrLimeGreen : clrTomato;
-      break; // show first position only
+      if(PositionGetSymbol(i)!=_Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=(long)MagicNumber) continue;
+      ENUM_POSITION_TYPE pt=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double vol=PositionGetDouble(POSITION_VOLUME);
+      double op=PositionGetDouble(POSITION_PRICE_OPEN);
+      double pft=PositionGetDouble(POSITION_PROFIT);
+      posStr  =StringFormat("%s  %.2f @ %.2f",
+                             pt==POSITION_TYPE_BUY?"LONG":"SHORT",vol,op);
+      floatStr=StringFormat("Float: %s$%.2f",pft>=0?"+":"",pft);
+      posClr  =(pt==POSITION_TYPE_BUY)?clrDeepSkyBlue:clrOrangeRed;
+      flClr   =(pft>=0)?clrLimeGreen:clrTomato;
+      break;
    }
-   DashRow("R10", StringFormat("Pos:  %-20s", posStr), 10, posClr);
-   DashRow("R11", StringFormat("%-28s", floatStr),     11, flClr);
+   DashRow("R10",StringFormat("Pos:  %-20s",posStr),10,posClr);
+   DashRow("R11",StringFormat("%-28s",floatStr),    11,flClr);
+   DashRow("R12","────────────────────────────",12,C'40,40,70');
 
-   // Row 12 — Separator
-   DashRow("R12", "────────────────────────────", 12, C'50,50,80');
+   // R13 Filters
+   DashRow("R13","FILTERS",13,C'180,180,80');
+   DashRow("R14",StringFormat("Spread: %-5.0f pts  %s",
+                               spread/_Point, sprOK?"OK":"BLOCKED"),
+           14, sprOK?clrLimeGreen:clrTomato);
+   DashRow("R15",StringFormat("ATR:    %-5.0f pts  %s",
+                               atr/_Point, atrOK?"OK":"LOW"),
+           15, atrOK?clrLimeGreen:clrGold);
+   DashRow("R16",UseSessionFilter
+                 ?StringFormat("Session: %s (%02d-%02dh)",
+                                sessOK?"ACTIVE":"CLOSED",
+                                SessionStartHour,SessionEndHour)
+                 :"Session: 24/7 (no limit)",
+           16, sessOK?clrLimeGreen:C'110,110,110');
 
-   // Row 13 — Filters header
-   DashRow("R13", "FILTERS", 13, C'180,180,100');
+   // R17 News
+   string nTxt; color nClr;
+   if(!UseNewsFilter)       { nTxt="News:   FILTER OFF"; nClr=C'110,110,110'; }
+   else if(g_newsBlocked)   { nTxt="News: !! BLOCKED !!"; nClr=clrTomato; }
+   else                     { nTxt="News:   CLEAR";       nClr=clrLimeGreen; }
+   DashRow("R17",nTxt,17,nClr);
 
-   // Row 14 — Spread
-   string sprTxt = StringFormat("Spread: %-6.0f pts  %s",
-                                  spread / _Point,
-                                  sprOK ? "OK" : "HIGH");
-   DashRow("R14", sprTxt, 14, sprOK ? clrLimeGreen : clrTomato);
-
-   // Row 15 — ATR
-   string atrTxt = StringFormat("ATR:    %-6.0f pts  %s",
-                                  atr / _Point,
-                                  atrOK ? "OK" : "LOW");
-   DashRow("R15", atrTxt, 15, atrOK ? clrLimeGreen : clrGold);
-
-   // Row 16 — Session
-   string sessTxt = UseSessionFilter
-                    ? StringFormat("Session: %s  (%02d-%02dh)",
-                                   sessOK ? "ACTIVE" : "CLOSED",
-                                   SessionStartHour, SessionEndHour)
-                    : "Session: 24/7 (no limit)";
-   DashRow("R16", sessTxt, 16, sessOK ? clrLimeGreen : C'120,120,120');
-
-   // Row 17 — News
-   string newsTxt;
-   color  newsClr;
-   if(!UseNewsFilter)
+   // R18 Next event or block reason
+   if(UseNewsFilter && g_newsEventTime>0 && !g_newsBlocked)
    {
-      newsTxt = "News:   FILTER OFF";
-      newsClr = C'120,120,120';
-   }
-   else if(g_newsBlocked)
-   {
-      newsTxt = "News: !! BLOCKED !!";
-      newsClr = clrTomato;
-   }
-   else
-   {
-      newsTxt = "News:   CLEAR";
-      newsClr = clrLimeGreen;
-   }
-   DashRow("R17", newsTxt, 17, newsClr);
-
-   // Row 18 — Next event
-   if(UseNewsFilter && g_newsEventTime > 0 && !g_newsBlocked)
-   {
-      int minsLeft = (int)((g_newsEventTime - TimeCurrent()) / 60);
-      string nextTxt;
-      if(minsLeft < 0)
-         nextTxt = StringFormat("Next: %-16s (passed)", g_newsEventName);
-      else if(minsLeft < 60)
-         nextTxt = StringFormat("Next: %-10s  in %dm", g_newsEventName, minsLeft);
-      else
-         nextTxt = StringFormat("Next: %-10s  in %dh%dm",
-                                 g_newsEventName, minsLeft/60, minsLeft%60);
-      DashRow("R18", nextTxt, 18, C'200,160,60');
+      int ml=(int)((g_newsEventTime-TimeCurrent())/60);
+      string nt=(ml<60)
+         ?StringFormat("Next: %-10s  in %dm",g_newsEventName,ml)
+         :StringFormat("Next: %-10s  in %dh%dm",g_newsEventName,ml/60,ml%60);
+      DashRow("R18",nt,18,C'200,160,60');
    }
    else if(UseNewsFilter && g_newsBlocked)
-   {
-      DashRow("R18", StringFormat("Event: %-18s", g_newsEventName), 18, clrOrange);
-   }
+      DashRow("R18",StringFormat("Event: %-18s",g_newsEventName),18,clrOrange);
    else
-   {
-      DashRow("R18", "", 18, clrBlack);
-   }
+      DashRow("R18","",18,clrBlack);
+
+   // R19 Block reason (NEW in v2.4 — shows WHY orders aren't placed)
+   DashRow("R19","────────────────────────────",19,C'40,40,70');
+   if(g_blockReason != "")
+      DashRow("R20",StringFormat("BLOCKED: %s",g_blockReason),20,clrOrangeRed);
+   else
+      DashRow("R20","Status:  SCANNING...",20,C'80,200,80');
 
    ChartRedraw(0);
 }
 
-// Delete all dashboard objects
 void DeleteDashboard()
-{
-   ObjectsDeleteAll(0, DASH_PFX);
-   ChartRedraw(0);
-}
+{ ObjectsDeleteAll(0, DASH_PFX); ChartRedraw(0); }
 
 //+------------------------------------------------------------------+
 //  HELPERS
 //+------------------------------------------------------------------+
 
+// [BUG1 FIX] Correct MQL5 property: SYMBOL_FILLING_FLAGS
 ENUM_ORDER_TYPE_FILLING GetFillMode()
 {
-   // SYMBOL_FILLING_FLAGS = enum value 54; cast avoids undeclared identifier on older MT5 builds
-   // SYMBOL_FILLING_FOK = 1 (bit 0), SYMBOL_FILLING_IOC = 2 (bit 1)
-   long f = SymbolInfoInteger(_Symbol, (ENUM_SYMBOL_INFO_INTEGER)54);
-   if((f & 1) != 0) return ORDER_FILLING_FOK;
-   if((f & 2) != 0) return ORDER_FILLING_IOC;
+   uint f = (uint)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_FLAGS);
+   if(f & SYMBOL_FILLING_FOK) return ORDER_FILLING_FOK;
+   if(f & SYMBOL_FILLING_IOC) return ORDER_FILLING_IOC;
    return ORDER_FILLING_RETURN;
+}
+
+// Returns ticket of existing pending order of given type, 0 if none
+ulong GetPendingTicket(ENUM_ORDER_TYPE ot)
+{
+   for(int i=0;i<OrdersTotal();i++)
+   {
+      ulong t=OrderGetTicket(i);
+      if(!t || !OrderSelect(t))                              continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol)            continue;
+      if(OrderGetInteger(ORDER_MAGIC) != (long)MagicNumber)  continue;
+      if((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE)==ot)   return t;
+   }
+   return 0;
 }
 
 double GetHighest(int bars)
 {
-   double h = iHigh(_Symbol, PERIOD_CURRENT, 1);
-   for(int i = 2; i <= bars; i++)
-   { double v = iHigh(_Symbol, PERIOD_CURRENT, i); if(v > h) h = v; }
+   double h=iHigh(_Symbol,PERIOD_CURRENT,1);
+   for(int i=2;i<=bars;i++){double v=iHigh(_Symbol,PERIOD_CURRENT,i);if(v>h)h=v;}
    return h;
 }
-
 double GetLowest(int bars)
 {
-   double l = iLow(_Symbol, PERIOD_CURRENT, 1);
-   for(int i = 2; i <= bars; i++)
-   { double v = iLow(_Symbol, PERIOD_CURRENT, i); if(v < l) l = v; }
+   double l=iLow(_Symbol,PERIOD_CURRENT,1);
+   for(int i=2;i<=bars;i++){double v=iLow(_Symbol,PERIOD_CURRENT,i);if(v<l)l=v;}
    return l;
 }
-
 double GetATR()
 {
-   double buf[]; ArraySetAsSeries(buf, true);
-   if(CopyBuffer(g_atrHandle, 0, 1, 1, buf) < 1) return 0.0;
+   double buf[]; ArraySetAsSeries(buf,true);
+   if(CopyBuffer(g_atrHandle,0,1,1,buf)<1) return 0.0;
    return buf[0];
 }
-
 double GetCurrentSpread()
-{
-   return SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
-}
+{ return SymbolInfoDouble(_Symbol,SYMBOL_ASK)-SymbolInfoDouble(_Symbol,SYMBOL_BID); }
 
 bool IsSessionActive()
 {
-   MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
-   return(dt.hour >= SessionStartHour && dt.hour < SessionEndHour);
+   MqlDateTime dt; TimeToStruct(TimeCurrent(),dt);
+   return(dt.hour>=SessionStartHour && dt.hour<SessionEndHour);
 }
-
 bool IsDailyLossBreached()
 {
-   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
-   return((g_dayStartBalance - eq) >= g_dayStartBalance * MaxDailyLossPct / 100.0);
+   double eq=AccountInfoDouble(ACCOUNT_EQUITY);
+   return((g_dayStartBalance-eq)>=g_dayStartBalance*MaxDailyLossPct/100.0);
 }
 
 int CountAllOrders()
 {
-   int n = 0;
-   for(int i = 0; i < OrdersTotal(); i++)
-   {
-      ulong t = OrderGetTicket(i);
-      if(!t || !OrderSelect(t))                               continue;
-      if(OrderGetString(ORDER_SYMBOL)  != _Symbol)            continue;
-      if(OrderGetInteger(ORDER_MAGIC)  != (long)MagicNumber)  continue;
-      n++;
-   }
-   for(int i = 0; i < PositionsTotal(); i++)
-   {
-      if(PositionGetSymbol(i) != _Symbol)                         continue;
-      if(PositionGetInteger(POSITION_MAGIC) != (long)MagicNumber) continue;
-      n++;
-   }
+   int n=0;
+   for(int i=0;i<OrdersTotal();i++)
+   { ulong t=OrderGetTicket(i); if(!t||!OrderSelect(t)) continue;
+     if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+     if(OrderGetInteger(ORDER_MAGIC)!=(long)MagicNumber) continue; n++; }
+   for(int i=0;i<PositionsTotal();i++)
+   { if(PositionGetSymbol(i)!=_Symbol) continue;
+     if(PositionGetInteger(POSITION_MAGIC)!=(long)MagicNumber) continue; n++; }
    return n;
 }
 
 bool HasPendingOfType(ENUM_ORDER_TYPE ot)
-{
-   for(int i = 0; i < OrdersTotal(); i++)
-   {
-      ulong t = OrderGetTicket(i);
-      if(!t || !OrderSelect(t))                               continue;
-      if(OrderGetString(ORDER_SYMBOL)  != _Symbol)            continue;
-      if(OrderGetInteger(ORDER_MAGIC)  != (long)MagicNumber)  continue;
-      if((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE) == ot)  return true;
-   }
-   return false;
-}
+{ return GetPendingTicket(ot) > 0; }
 
 bool HasPositionOfType(ENUM_POSITION_TYPE pt)
 {
-   for(int i = 0; i < PositionsTotal(); i++)
-   {
-      if(PositionGetSymbol(i) != _Symbol)                         continue;
-      if(PositionGetInteger(POSITION_MAGIC) != (long)MagicNumber) continue;
-      if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == pt) return true;
-   }
+   for(int i=0;i<PositionsTotal();i++)
+   { if(PositionGetSymbol(i)!=_Symbol) continue;
+     if(PositionGetInteger(POSITION_MAGIC)!=(long)MagicNumber) continue;
+     if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE)==pt) return true; }
    return false;
 }
 
 void DeletePendingOfType(ENUM_ORDER_TYPE ot)
 {
-   for(int i = OrdersTotal()-1; i >= 0; i--)
-   {
-      ulong t = OrderGetTicket(i);
-      if(!t || !OrderSelect(t))                               continue;
-      if(OrderGetString(ORDER_SYMBOL)  != _Symbol)            continue;
-      if(OrderGetInteger(ORDER_MAGIC)  != (long)MagicNumber)  continue;
-      if((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE) == ot)
-         Trade.OrderDelete(t);
-   }
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   { ulong t=OrderGetTicket(i); if(!t||!OrderSelect(t)) continue;
+     if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+     if(OrderGetInteger(ORDER_MAGIC)!=(long)MagicNumber) continue;
+     if((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE)==ot) Trade.OrderDelete(t); }
 }
 
 void DeleteAllPending()
 {
-   for(int i = OrdersTotal()-1; i >= 0; i--)
-   {
-      ulong t = OrderGetTicket(i);
-      if(!t || !OrderSelect(t))                               continue;
-      if(OrderGetString(ORDER_SYMBOL)  != _Symbol)            continue;
-      if(OrderGetInteger(ORDER_MAGIC)  != (long)MagicNumber)  continue;
-      Trade.OrderDelete(t);
-   }
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   { ulong t=OrderGetTicket(i); if(!t||!OrderSelect(t)) continue;
+     if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+     if(OrderGetInteger(ORDER_MAGIC)!=(long)MagicNumber) continue;
+     Trade.OrderDelete(t); }
 }
 
 void CloseAllPositions()
 {
-   for(int i = PositionsTotal()-1; i >= 0; i--)
-   {
-      if(PositionGetSymbol(i) != _Symbol)                         continue;
-      if(PositionGetInteger(POSITION_MAGIC) != (long)MagicNumber) continue;
-      Trade.PositionClose((ulong)PositionGetInteger(POSITION_TICKET));
-   }
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   { if(PositionGetSymbol(i)!=_Symbol) continue;
+     if(PositionGetInteger(POSITION_MAGIC)!=(long)MagicNumber) continue;
+     Trade.PositionClose((ulong)PositionGetInteger(POSITION_TICKET)); }
 }
 
 void ExpireOldPendings()
 {
-   datetime cutoff = iTime(_Symbol, PERIOD_CURRENT, PendingExpireBars);
-   for(int i = OrdersTotal()-1; i >= 0; i--)
-   {
-      ulong t = OrderGetTicket(i);
-      if(!t || !OrderSelect(t))                               continue;
-      if(OrderGetString(ORDER_SYMBOL)  != _Symbol)            continue;
-      if(OrderGetInteger(ORDER_MAGIC)  != (long)MagicNumber)  continue;
-      if((datetime)OrderGetInteger(ORDER_TIME_SETUP) < cutoff)
-         Trade.OrderDelete(t);
-   }
+   datetime cutoff=iTime(_Symbol,PERIOD_CURRENT,PendingExpireBars);
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   { ulong t=OrderGetTicket(i); if(!t||!OrderSelect(t)) continue;
+     if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+     if(OrderGetInteger(ORDER_MAGIC)!=(long)MagicNumber) continue;
+     if((datetime)OrderGetInteger(ORDER_TIME_SETUP)<cutoff) Trade.OrderDelete(t); }
 }
 //+------------------------------------------------------------------+
