@@ -248,6 +248,22 @@ public:
       return PositionClosePartial((ulong)PositionGetInteger(POSITION_TICKET), volume);
    }
 
+   // Modify a pending order's price, SL, TP and expiry
+   bool OrderModify(ulong ticket, double price, double sl, double tp,
+                    ENUM_ORDER_TYPE_TIME type_time=ORDER_TIME_GTC,
+                    datetime expiration=0)
+   {
+      MqlTradeRequest req; ZeroMemory(req);
+      req.action     = TRADE_ACTION_MODIFY;
+      req.order      = ticket;
+      req.price      = price;
+      req.sl         = sl;
+      req.tp         = tp;
+      req.type_time  = type_time;
+      req.expiration = expiration;
+      return SendOrder(req);
+   }
+
    bool OrderDelete(ulong ticket)
    {
       MqlTradeRequest req; ZeroMemory(req);
